@@ -27,7 +27,7 @@ html,body{height:100%;margin:0;overflow:hidden;background:var(--paper);color:var
   <h1>Colors</h1>
   <p id="mode">確認中…</p>
   <div class="list"><button class="btn" id="tNew" disabled>読み込み中…</button><button class="btn" id="tCont" disabled>つづきから</button></div>
-  <p class="note">Meta Quest のブラウザで開くと、その場に立ったまま、周りを見回して遊びます。<br>パソコンでは、ドラッグか矢印キーで見回し、クリックかEで調べる・進める・選ぶ、J・K・Lで赤・緑・青、Qで光と色の切り替え、Escでメニュー、Rで正面を合わせる。</p>
+  <p class="note">Meta Quest のブラウザで開くと、その場に立ったまま、周りを見回して遊びます。<br>パソコンでは、ドラッグか矢印キーで見回し、クリックかEで調べる・進める・選ぶ、J・K・Lで赤・緑・青、Qで光と色の切り替え、Escでメニュー、Rで正面を合わせる、Backspaceで手に取った物を戻す。</p>
   <p class="note" id="err"></p>
 </div>
 <div id="toast"></div>
@@ -36,6 +36,7 @@ window.__err = function (m) { var e = document.getElementById('err'); if (e) e.t
 window.addEventListener('error', function (ev) { window.__err('エラー：' + (ev.message || '不明')); });
 </script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
 <script>
 "use strict";
 (function () {
@@ -1338,6 +1339,8 @@ function inView(pos, ang) { return headDir.angleTo(tmp.copy(pos).sub(headPos)) <
 
 // 手（コントローラー）。Questのブラウザは手の形を描かないので、簡単な形を描く
 const hands = { left: null, right: null }, ctrls = [];
+let fakeHands = false;   // 自動テスト用（パソコンで手を置いてみる）
+const handsOn = () => inXR || fakeHands;
 function handModel() {
   const g = new THREE.Group();
   const body = new THREE.Mesh(new THREE.CylinderGeometry(0.017, 0.02, 0.1, 12), new THREE.MeshBasicMaterial({ color: 0x8a8a8a }));
@@ -1348,15 +1351,78 @@ function handModel() {
 }
 for (let i = 0; i < 2; i++) {
   const ray = xr.getController(i), grip = xr.getControllerGrip(i);
-  rig.add(ray); rig.add(grip); grip.add(handModel());
-  const h = { ray, grip, src: null, hand: null };
-  ray.addEventListener('connected', e => { h.src = e.data; h.hand = e.data.handedness; if (h.hand === 'left' || h.hand === 'right') hands[h.hand] = h; labelsDirty = true; });
+  rig.add(ray); rig.add(grip);
+  const h = { ray, grip, src: null, hand: null, simple: handModel(), model: null };
+  grip.add(h.simple);
+  ray.addEventListener('connected', e => { h.src = e.data; h.hand = e.data.handedness; if (h.hand === 'left' || h.hand === 'right') { hands[h.hand] = h; loadCtrlModel(h); } labelsDirty = true; });
   ray.addEventListener('disconnected', () => { if (h.hand && hands[h.hand] === h) hands[h.hand] = null; h.src = null; labelsDirty = true; });
   ctrls.push(h);
 }
 function buzz(hand, power, ms) {
   const hs = hand === 'both' ? [hands.left, hands.right] : [hands[hand]];
   for (const h of hs) { try { const a = h && h.src && h.src.gamepad && h.src.gamepad.hapticActuators && h.src.gamepad.hapticActuators[0]; if (a && a.pulse) a.pulse(power, ms); } catch (e) {} }
+}
+
+// 本物のコントローラーの形（Meta純正の形の公開データ）。読み込めないときは簡単な形のまま
+const PROFILE_BASE = window.__PROFILE_BASE || 'https://cdn.jsdelivr.net/npm/@webxr-input-profiles/assets@1.0/dist/profiles/';
+const KNOWN_PROFILES = ['meta-quest-touch-plus', 'meta-quest-touch-plus-v2', 'meta-quest-touch-pro', 'oculus-touch-v3', 'oculus-touch-v2', 'oculus-touch'];
+const modelCache = {};
+function loadCtrlModel(h) {
+  if (h.model && h.model.hand === h.hand) return;
+  if (!THREE.GLTFLoader) return;
+  const prof = ((h.src && h.src.profiles) || []).find(p => KNOWN_PROFILES.includes(p)) || 'meta-quest-touch-plus';
+  const url = PROFILE_BASE + prof + '/' + h.hand + '.glb', hand = h.hand;
+  if (!modelCache[url]) modelCache[url] = new Promise((ok, ng) => new THREE.GLTFLoader().load(url, g => ok(g.scene), undefined, ng));
+  modelCache[url].then(sc => {
+    if (h.hand !== hand) return;
+    const root = sc.clone(true);
+    if (h.model) h.grip.remove(h.model.root);
+    h.grip.remove(h.simple);
+    setupModel(h, root, hand); h.grip.add(root); labelsDirty = true;
+  }).catch(() => {});
+}
+const BTN_COL = { red: 0xe02424, green: 0x1fb04c, blue: 0x2f5bff, white: 0xf2f2f2, gray: 0x9a9a9a };
+function setupModel(h, root, hand) {
+  const nodes = {};
+  root.traverse(o => {
+    nodes[o.name] = o;
+    if (o.isMesh) {   // 部屋に明かりがないので、明かりのいらない描き方にする
+      const m0 = o.material;
+      o.material = new THREE.MeshBasicMaterial({ map: m0.map || null, color: m0.map ? 0xffffff : 0x666666 });
+      o.userData.map = m0.map || null; o.renderOrder = 6;
+    }
+  });
+  const comps = [];
+  const add = (prefix, idx, axis) => { const v = nodes[prefix + '_pressed_value'], mn = nodes[prefix + '_pressed_min'], mx = nodes[prefix + '_pressed_max']; if (v && mn && mx) comps.push({ v, mn, mx, idx, axis }); };
+  add('xr_standard_trigger', 0); add('xr_standard_squeeze', 1); add('xr_standard_thumbstick', 3);
+  add('xr_standard_thumbstick_xaxis', 2, true); add('xr_standard_thumbstick_yaxis', 3, true);
+  add(hand === 'right' ? 'a_button' : 'x_button', 4); add(hand === 'right' ? 'b_button' : 'y_button', 5);
+  h.model = { root, hand, comps, parts: { trig: nodes.trigger, grip: nodes.squeeze, a: nodes.a_button || nodes.x_button, b: nodes.b_button || nodes.y_button, stick: nodes.thumbstick }, cols: {} };
+}
+// ボタンに色をつける（能力を得てから）。押している間は少し明るく
+function paintPart(h, key, col, on) {
+  const m = h.model && h.model.parts[key]; if (!m) return;
+  const sig = col + ':' + on; if (h.model.cols[key] === sig) return; h.model.cols[key] = sig;
+  if (col == null) { m.material.map = m.userData.map; m.material.color.set(m.userData.map ? 0xffffff : 0x666666); }
+  else { m.material.map = null; m.material.color.set(col); if (on) m.material.color.lerp(new THREE.Color(0xffffff), 0.45); }
+  m.material.needsUpdate = true;
+}
+function animModel(h) {
+  const md = h.model, gp = h.src && h.src.gamepad; if (!md || !gp) return;
+  for (const c of md.comps) {
+    let v = c.axis ? ((gp.axes[c.idx] || 0) + 1) / 2 : (gp.buttons[c.idx] ? gp.buttons[c.idx].value || (gp.buttons[c.idx].pressed ? 1 : 0) : 0);
+    c.v.position.lerpVectors(c.mn.position, c.mx.position, v); c.v.quaternion.slerpQuaternions(c.mn.quaternion, c.mx.quaternion, v);
+  }
+  const F = G.flags, pr = i => !!(gp.buttons[i] && gp.buttons[i].pressed);
+  if (h.hand === 'right') {
+    paintPart(h, 'trig', F.ev.ctrlSeen ? BTN_COL.white : null, pr(0));
+    paintPart(h, 'a', F.red ? BTN_COL.red : null, pr(4));
+    paintPart(h, 'b', F.green ? BTN_COL.green : null, pr(5));
+    paintPart(h, 'grip', F.blue ? BTN_COL.blue : null, pr(1));
+  } else {
+    const blink = !!(hint && Math.floor((performance.now() - hint.t0) / 550) % 2 === 0 && performance.now() - hint.t0 < 3300);
+    paintPart(h, 'b', blink ? BTN_COL.white : null, pr(5));
+  }
 }
 
 // 右手から出る線（光線）と、当たった所の丸
@@ -1489,54 +1555,77 @@ function drawNoise(k) {
   b.tex.needsUpdate = true;
 }
 
-/* ---- 手の札（そのボタンで何ができるか。手を見たときに出る） ---- */
-const labL = makeBoard(560, 300, 0.2, 55), labR = makeBoard(560, 300, 0.2, 55);
-labL.follow = labR.follow = false;
-let labelsDirty = true, labSig = '';
-function handLines() {
+/* ---- 手の札：手を見ると、ボタンから線がのびて、そのボタンでできることが出る ---- */
+let labelsDirty = true;
+const TAG_N = 7, TAG_W = 0.12;
+function makeTagSet() {
+  const tags = [];
+  for (let i = 0; i < TAG_N; i++) { const b = makeBoard(440, 84, TAG_W, 57); b.follow = false; b.sig = ''; tags.push(b); }
+  const lg = new THREE.BufferGeometry(); lg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(TAG_N * 6), 3));
+  const lines = new THREE.LineSegments(lg, new THREE.LineBasicMaterial({ color: 0x222222, depthTest: false, transparent: true, opacity: 0.9 }));
+  lines.renderOrder = 56; lines.frustumCulled = false; lines.visible = false; scene.add(lines);
+  return { tags, lines };
+}
+const tagSets = { left: makeTagSet(), right: makeTagSet() };
+// [ボタンの場所, 字, 色]。場所がnullの札は線を引かない
+function handRows() {
   const F = G.flags, pm = paintMode;
   const R = [], L = [];
-  if (F.ev.ctrlSeen) R.push(['人差し指', '調べる']);
-  if (F.red) R.push(['A', pm ? '赤色' : '赤', '#ff5a5a']);
-  if (F.green) R.push(['B', pm && F.paintGB ? '緑色' : '緑', '#3fd06a']);
-  if (F.blue) R.push(['握る', pm && F.paintGB ? '青色' : '青', '#7f9bff']);
-  if (pm && F.ev.blackReady) R.push(['A・B・握る', '黒色']);
-  else if (!pm && F.white) R.push(['A・B・握る', '白い光']);
-  L.push(['Y', 'メニュー', null, 'menu']);
-  if (F.redPaint) L.push(['X', pm ? '光⇄［色］' : '［光］⇄色']);
-  if (insp && insp.state === 'hold') L.push(['人差し指', 'やめる']);
-  L.push(['スティック押す', '正面']);
+  if (F.ev.ctrlSeen) R.push(['trig', '調べる', '#fff']);
+  if (F.red) R.push(['a', pm ? '赤色' : '赤', '#ff5a5a']);
+  if (F.green) R.push(['b', pm && F.paintGB ? '緑色' : '緑', '#3fd06a']);
+  if (F.blue) R.push(['grip', pm && F.paintGB ? '青色' : '青', '#7f9bff']);
+  if (pm && F.ev.blackReady) R.push([null, 'A・B・握る：黒色', '#fff']);
+  else if (!pm && F.white) R.push([null, 'A・B・握る：白い光', '#fff']);
+  R.push(['stick', '左右に倒す：回る', '#bbb']);
+  const blink = !!(hint && Math.floor((performance.now() - hint.t0) / 550) % 2 === 0 && performance.now() - hint.t0 < 3300);
+  L.push(['b', 'メニュー' + (hint && hint.required ? '　←' : ''), '#fff', blink]);
+  if (F.redPaint) L.push(['a', pm ? '光⇄［色］' : '［光］⇄色', '#fff']);
+  if (insp && insp.state === 'hold') L.push(['trig', 'やめる', '#fff']);
+  L.push(['stick', '押す：正面', '#bbb']);
+  if (room && room.time) L.push([null, '時代：' + ERA_LABEL[era], '#fff']);
   return { R, L };
 }
-function drawHand(b, rows, blink) {
-  const g = b.g; resizeBoard(b, 24 + rows.length * 62); g.clearRect(0, 0, b.pw, b.ph);
-  if (!rows.length) { b.tex.needsUpdate = true; return; }
-  frame(g, 0, 0, b.pw, b.ph, 'rgba(0,0,0,.82)', '#fff', 4);
-  g.textBaseline = 'middle'; g.textAlign = 'left';
-  rows.forEach((r, i) => {
-    const y = 12 + i * 62;
-    const on = r[3] === 'menu' && blink;
-    if (on) { g.fillStyle = '#fff'; g.fillRect(8, y + 2, b.pw - 16, 58); }
-    g.font = `30px ${FONT}`; g.fillStyle = on ? '#000' : '#aaa'; g.fillText(r[0], 22, y + 32);
-    g.font = `38px ${FONT}`; g.fillStyle = on ? '#000' : (r[2] || '#fff'); g.fillText(r[1] + (r[3] === 'menu' && hint && hint.required ? '　←' : ''), 240, y + 32);
-  });
+function drawTag(b, row) {
+  const sig = JSON.stringify(row); if (b.sig === sig) return; b.sig = sig;
+  const g = b.g; g.clearRect(0, 0, b.pw, b.ph);
+  const inv = !!row[3];
+  g.font = `40px ${FONT}`; const w = Math.min(b.pw, g.measureText(row[1]).width + 40);
+  b.tw = w / b.pw;
+  frame(g, 0, 0, w, b.ph, inv ? '#fff' : 'rgba(0,0,0,.85)', inv ? '#000' : '#fff', 3);
+  g.fillStyle = inv ? '#000' : row[2]; g.textAlign = 'left'; g.textBaseline = 'middle'; g.fillText(row[1], 20, b.ph / 2 + 2);
   b.tex.needsUpdate = true;
 }
+const tagP = V(0, 0, 0), btnP = V(0, 0, 0), rightV = V(0, 0, 0), upV = V(0, 0, 0), qHead = new THREE.Quaternion();
 function updateHands() {
-  const vis = inXR && playing && !pro;
-  const blinkOn = !!(hint && Math.floor((performance.now() - hint.t0) / 550) % 2 === 0 && performance.now() - hint.t0 < 3300);
-  const { R, L } = handLines();
-  const sig = JSON.stringify([R, L, blinkOn, !!(hint && hint.required)]);
-  if (sig !== labSig || labelsDirty) { labSig = sig; labelsDirty = false; drawHand(labR, R, false); drawHand(labL, L, blinkOn); }
-  for (const [b, h, force] of [[labR, hands.right, false], [labL, hands.left, !!hint]]) {
-    if (!vis || !h) { b.mesh.visible = false; continue; }
-    const src = h.grip.visible !== false ? h.grip : h.ray;
-    src.getWorldPosition(tmp2);
-    const look = inView(tmp2, 0.55);
-    b.mesh.visible = (look || force) && b.ph > 30;
-    if (!b.mesh.visible) continue;
-    b.mesh.position.copy(tmp2).add(V(0, 0.1 + b.mw * b.ph / b.pw / 2, 0));
-    b.mesh.lookAt(headPos);
+  const vis = handsOn() && playing && !pro;
+  const rows = handRows();
+  camera.getWorldQuaternion(qHead); rightV.set(1, 0, 0).applyQuaternion(qHead); upV.set(0, 1, 0).applyQuaternion(qHead);
+  for (const side of ['right', 'left']) {
+    const set = tagSets[side], h = hands[side], list = side === 'right' ? rows.R : rows.L;
+    if (h) animModel(h);
+    let show = false;
+    if (vis && h) { h.grip.getWorldPosition(tmp2); show = inView(tmp2, 0.55) || (side === 'left' && !!hint); }
+    set.lines.visible = show;
+    const pos = set.lines.geometry.attributes.position; let n = 0;
+    set.tags.forEach((b, i) => {
+      const row = list[i];
+      if (!show || !row) { b.mesh.visible = false; return; }
+      drawTag(b, row);
+      const sx = side === 'right' ? 1 : -1;
+      // 札は、手の外側に、見ている向きにそろえて縦に並べる
+      h.grip.getWorldPosition(tagP);
+      tagP.addScaledVector(rightV, sx * 0.085).addScaledVector(upV, 0.07 - i * 0.03);
+      b.mesh.visible = true; b.mesh.quaternion.copy(qHead);
+      const tw = (b.tw || 1) * TAG_W;
+      b.mesh.position.copy(tagP).addScaledVector(rightV, side === 'right' ? TAG_W / 2 : TAG_W / 2 - tw);
+      const part = row[0] && (h.model ? h.model.parts[row[0]] : null);
+      if (row[0]) {
+        if (part) { part.getWorldPosition(btnP); } else h.grip.getWorldPosition(btnP);
+        pos.setXYZ(n++, btnP.x, btnP.y, btnP.z); pos.setXYZ(n++, tagP.x, tagP.y, tagP.z);
+      }
+    });
+    set.lines.geometry.setDrawRange(0, n); pos.needsUpdate = true;
   }
 }
 
@@ -1549,7 +1638,6 @@ function showButton() { labelsDirty = true; buzz('right', 0.2, 60); }
 function syncUnlocked() { labelsDirty = true; }
 // まだVR版で作っていない画面（通路1から先で使う）
 function notYet() { say('（この画面は、VR版ではまだ作っていない）'); }
-function openEditor() { notYet(); }
 function climb() { notYet(); }
 function startEnding() { notYet(); }
 let lastPress = performance.now();
@@ -1602,6 +1690,14 @@ function dialogAdvance() {
 /* ================= 時代（2-1・2-2） ================= */
 const ERAS = ['past', 'present', 'future'], ERA_LABEL = { past: '過去', present: '現在', future: '未来' };
 let era = 'present';
+const eraB = makeBoard(420, 130, 0.34, 63); eraB.follow = false;
+let eraT = 0;
+function showEra() {
+  const g = eraB.g; g.clearRect(0, 0, eraB.pw, eraB.ph);
+  frame(g, 0, 0, eraB.pw, eraB.ph, 'rgba(0,0,0,.8)', '#fff', 4);
+  g.fillStyle = '#fff'; g.font = `64px ${FONT}`; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText(ERA_LABEL[era], eraB.pw / 2, eraB.ph / 2 + 3);
+  eraB.tex.needsUpdate = true; showBoard(eraB, 1.5, 0.22); eraT = 1.8;
+}
 function setEra(e) {
   era = e;
   eraS.material.color.set(e === 'past' ? 0x966e32 : 0x28468c); eraS.material.opacity = e === 'present' ? 0 : 0.1;
@@ -1654,7 +1750,7 @@ function paint(c) {
     const r = t && t.real;
     if (r && F.seen[r.seen] && !F.ev[r.flag]) { F.ev[r.flag] = true; softFlash('green'); say(r.msg || '実体になった。'); return; }
   } else if (c === 'blue' && F.paintGB) {
-    if (room.time) { setEra(ERAS[(ERAS.indexOf(era) + 1) % 3]); softFlash('blue'); return; }
+    if (room.time) { setEra(ERAS[(ERAS.indexOf(era) + 1) % 3]); softFlash('blue'); showEra(); return; }
   }
   say('何も起きない。');
 }
@@ -1711,7 +1807,7 @@ function handPose(outP, outQ) {
 }
 // 持つ位置と向き（毎フレーム）。VR：右手の先。パソコン：頭の前1.1m
 function holdPose(outP, outQ) {
-  if (inXR && hands.right) { handPose(outP, hq); outQ.copy(hq).multiply(insp.rel); }
+  if (handsOn() && hands.right) { handPose(outP, hq); outQ.copy(hq).multiply(insp.rel); }
   else { outP.copy(headPos).addScaledVector(headDir, 1.1); outQ.copy(insp.pcQ); }
 }
 function inspect(obj, home, opt) {
@@ -1719,7 +1815,7 @@ function inspect(obj, home, opt) {
   // 手に来たとき、ふたが少しこちらを向くように（AR版と同じ傾き）
   const want = camera.getWorldQuaternion(new THREE.Quaternion()).multiply(qTilt);
   insp = { obj, opt: opt || {}, home: home.clone(), homeQ: g.quaternion.clone(), state: 'in', t: 0, p0: g.position.clone(), q0: g.quaternion.clone(), pcQ: want.clone(), rel: new THREE.Quaternion() };
-  if (inXR && hands.right) { handPose(hp, hq); insp.rel.copy(qInv.copy(hq).invert()).multiply(want); }
+  if (handsOn() && hands.right) { handPose(hp, hq); insp.rel.copy(qInv.copy(hq).invert()).multiply(want); }
   setLight(null); refreshUI(); buzz('right', 0.25, 60);
 }
 function endInspect() {
@@ -1745,27 +1841,102 @@ function inspTick(dt) {
   }
 }
 
+/* ================= 書き換えの板（名前の入力画面のように。書き換えられるのは1か所だけ） ================= */
+const KANA_PAGES = [
+  { name: 'ひらがな', rows: ['あいうえおかきくけこ', 'さしすせそたちつてと', 'なにぬねのはひふへほ', 'まみむめもやゆよわを', 'らりるれろんっゃゅょ', 'がぎぐげござじずぜぞ', 'だぢづでどばびぶべぼ', 'ぱぴぷぺぽぁぃぅぇぉ', 'ゔー・、。！？ゎゐゑ'] },
+  { name: 'カタカナ', rows: ['アイウエオカキクケコ', 'サシスセソタチツテト', 'ナニヌネノハヒフヘホ', 'マミムメモヤユヨワヲ', 'ラリルレロンッャュョ', 'ガギグゲゴザジズゼゾ', 'ダヂヅデドバビブベボ', 'パピプペポァィゥェォ', 'ヴー・、。！？ヮヰヱ'] },
+  { name: 'アルファベット', rows: ['ABCDEFGHIJ', 'KLMNOPQRST', 'UVWXYZ', 'abcdefghij', 'klmnopqrst', 'uvwxyz'] },
+  { name: '数字・記号', rows: ['０１２３４５６７８９', '：＋－＝＜＞！？…', '!?:+-=<>()./', 'ー・、。「」〜'] }
+];
+const edB = makeBoard(1200, 1000, 1.15, 64);
+let ed = null;
+function openEditor(edit) {
+  if (edit.blank) { notYet(); return; }   // 透明な空欄は3-2で作る
+  const orig = [...edit.text];
+  ed = { edit, orig, chars: orig.slice(), sel: 0, page: 0 };
+  editOpen = true; setLight(null); layoutEditor(); showBoard(edB, 1.4, -0.12); drawEditor(); refreshUI();
+}
+const ED_GY = 330, ED_GH = 70;
+function layoutEditor() {
+  const b = edB, n = ed.chars.length, cw = Math.min(100, 1100 / n), x0 = (b.pw - n * cw) / 2;
+  b.btns = [];
+  ed.chars.forEach((ch, i) => b.btns.push({ x: x0 + i * cw + 4, y: 36, w: cw - 8, h: 104, label: ch, kind: 'char', i, onClick: () => { ed.sel = i; drawEditor(); } }));
+  const tw = 270; KANA_PAGES.forEach((pg, i) => b.btns.push({ x: 33 + i * (tw + 12), y: 236, w: tw, h: 70, label: pg.name, kind: 'tab', i, onClick: () => { ed.page = i; layoutEditor(); drawEditor(); } }));
+  const gw = 108, gx0 = (b.pw - 10 * gw) / 2;
+  KANA_PAGES[ed.page].rows.forEach((row, r) => [...row].forEach((ch, c) => b.btns.push({ x: gx0 + c * gw + 3, y: ED_GY + r * ED_GH + 3, w: gw - 6, h: ED_GH - 6, label: ch, kind: 'key', onClick: () => pickChar(ch) })));
+  const by = ED_GY + 9 * ED_GH + 24;
+  b.btns.push({ x: 290, y: by, w: 290, h: 84, label: '決定', onClick: () => closeEditor(true) });
+  b.btns.push({ x: 620, y: by, w: 290, h: 84, label: 'やめる', onClick: () => closeEditor(false) });
+  resizeBoard(b, by + 112);
+}
+function drawEditor() {
+  const b = edB, g = b.g, white = ed.edit.style === 'white'; g.clearRect(0, 0, b.pw, b.ph);
+  frame(g, 0, 0, b.pw, b.ph, '#000', '#fff', 6);
+  g.textAlign = 'center'; g.textBaseline = 'middle';
+  for (const t of b.btns) {
+    const hot = b.hover === t;
+    if (t.kind === 'char') {
+      const sel = t.i === ed.sel, chg = ed.chars[t.i] !== ed.orig[t.i];
+      frame(g, t.x, t.y, t.w, t.h, sel ? '#fff' : hot ? '#333' : '#000', sel ? '#fff' : '#777', sel ? 6 : 3);
+      g.font = `72px ${FONT}`; g.fillStyle = white ? (sel ? '#000' : '#fff') : '#e01818'; g.fillText(ed.chars[t.i], t.x + t.w / 2, t.y + t.h / 2 + 4);
+      if (chg) { g.fillStyle = sel ? '#000' : '#fff'; g.fillRect(t.x + 14, t.y + t.h - 14, t.w - 28, 5); }
+    } else if (t.kind === 'tab') {
+      const cur = t.i === ed.page;
+      frame(g, t.x, t.y, t.w, t.h, cur ? '#fff' : hot ? '#333' : '#000', '#fff', 3);
+      g.font = `34px ${FONT}`; g.fillStyle = cur ? '#000' : '#fff'; g.fillText(t.label, t.x + t.w / 2, t.y + t.h / 2 + 2);
+    } else if (t.kind === 'key') {
+      frame(g, t.x, t.y, t.w, t.h, hot ? '#fff' : '#000', '#666', 2);
+      g.font = `44px ${FONT}`; g.fillStyle = hot ? '#000' : '#fff'; g.fillText(t.label, t.x + t.w / 2, t.y + t.h / 2 + 3);
+    } else drawButton(g, t, hot, { center: true, size: 44 });
+  }
+  g.font = `28px ${FONT}`; g.fillStyle = '#aaa'; g.textAlign = 'center';
+  g.fillText('書き換えたい文字を選び、下の表から入れる文字を選んで「決定」', b.pw / 2, 172);
+  g.fillText('書き換えられるのは、一文字だけ', b.pw / 2, 208);
+  b.tex.needsUpdate = true;
+}
+function pickChar(ch) { ed.chars = ed.orig.slice(); ed.chars[ed.sel] = ch; drawEditor(); }   // 1か所だけ：ほかの場所を変えていたら元に戻す
+function closeEditor(submit) {
+  const e = ed; editOpen = false; hideBoard(edB); ed = null; refreshUI();
+  if (!submit) return;
+  if (e.chars.join('').replace(/　/g, '') === e.edit.goal) { softFlash('red'); e.edit.done(); }
+  else say('何も起きない。');
+}
+
 /* ================= メニュー ================= */
 const menuB = makeBoard(720, 100, 0.72, 64);
 let menuItems = [];
+const TEST_ROOMS = [['1-1', 's1', []], ['通路1', 'c1', []], ['1-2', 's2', ['red']], ['通路2', 'c2', ['red']], ['1-3', 's3', ['red', 'green']], ['通路3', 'c3', ['red', 'green']],
+  ['1-4', 's4', ['red', 'green', 'blue']], ['通路4', 'c4', ['red', 'green', 'blue']], ['2-1', 's5', ['red', 'green', 'blue', 'redPaint']]];
+let menuSub = null;
+function testGo(id, gifts) {
+  closeMenu(); G.flags = newFlags(); G.flags.ev.ctrlSeen = true; for (const k of gifts) G.flags[k] = true;
+  paintMode = false; hint = null; labelsDirty = true; goRoom(id);
+}
 function buildMenu() {
   const F = G.flags;
-  menuItems = [
+  if (menuSub === 'rooms') {
+    menuItems = TEST_ROOMS.map(r => [r[0] + 'へ', () => { menuSub = null; testGo(r[1], r[2]); }]).concat([['もどる', () => { menuSub = null; buildMenu(); drawMenu(); }]]);
+  } else menuItems = [
     ['ゲームに戻る', closeMenu],
     ['途中セーブして中断', saveAndQuit],
     ['操作方法', () => { closeMenu(); openManual(); }, 'manual'],
     ['話を振り返る', () => { closeMenu(); openLog(); }],
     ['正面を合わせる', () => { closeMenu(); recenter(); }],
     ['試験：赤・緑・青・白の光を使う', () => { closeMenu(); F.red = F.green = F.blue = F.white = true; F.ev.ctrlSeen = true; labelsDirty = true; say('（試験）赤・緑・青・白の光が使えるようになった。'); }],
-    ['試験：パススルーを見る', () => { closeMenu(); testPassthrough(); }]
+    ['試験：パススルーを見る', () => { closeMenu(); testPassthrough(); }],
+    ['試験：部屋を選ぶ', () => { menuSub = 'rooms'; buildMenu(); drawMenu(); }]
   ];
-  const h = 40 + menuItems.length * 96;
-  resizeBoard(menuB, h);
-  menuB.btns = menuItems.map((it, i) => ({ x: 30, y: 30 + i * 96, w: 660, h: 82, label: it[0], onClick: it[1], hint: it[2] === 'manual' }));
+  // 部屋を選ぶときは2列にする（縦に長くなりすぎないように）
+  const two = menuSub === 'rooms', rows = two ? Math.ceil(menuItems.length / 2) : menuItems.length;
+  resizeBoard(menuB, 40 + rows * 96 + (two ? 70 : 0));
+  menuB.btns = menuItems.map((it, i) => two
+    ? { x: 30 + (i % 2) * 335, y: 100 + Math.floor(i / 2) * 96, w: 325, h: 82, label: it[0], onClick: it[1] }
+    : { x: 30, y: 30 + i * 96, w: 660, h: 82, label: it[0], onClick: it[1], hint: it[2] === 'manual' });
 }
 function drawMenu() {
   const b = menuB, g = b.g; g.clearRect(0, 0, b.pw, b.ph);
   frame(g, 0, 0, b.pw, b.ph, '#000', '#fff', 6);
+  if (menuSub === 'rooms') { g.fillStyle = '#aaa'; g.font = `34px ${FONT}`; g.textAlign = 'left'; g.textBaseline = 'middle'; g.fillText('試験：部屋を選ぶ（はじめの状態で入る）', 34, 60); }
   const blink = hint && Math.floor((performance.now() - menuB.t0) / 550) % 2 === 1 && performance.now() - menuB.t0 < 3300;
   for (const bt of b.btns) drawButton(g, bt, b.hover === bt, { inv: bt.hint && hint && !blink, size: 38 });
   b.tex.needsUpdate = true;
@@ -1776,7 +1947,7 @@ function openMenu() {
   if (dlg) dlgB.mesh.visible = false;
   refreshUI();
 }
-function closeMenu() { menuOpen = false; hideBoard(menuB); if (dlg) dlgB.mesh.visible = true; refreshUI(); }
+function closeMenu() { menuOpen = false; menuSub = null; hideBoard(menuB); if (dlg) dlgB.mesh.visible = true; refreshUI(); }
 function saveAndQuit() {
   let ok = false;
   try { localStorage.setItem(SAVE_KEY, JSON.stringify({ scr: room.id, flags: G.flags, log: G.log })); ok = true; } catch (e) {}
@@ -1884,7 +2055,8 @@ function drawLog() {
   for (const bt of b.btns) drawButton(g, bt, b.hover === bt, { center: true });
   b.tex.needsUpdate = true;
 }
-const redrawBoard = b => b === menuB ? drawMenu() : b === manB ? drawManual() : b === logB ? drawLog() : b === codeB ? drawCode() : null;
+const redrawBoard = b => b === menuB ? drawMenu() : b === manB ? drawManual() : b === logB ? drawLog() : b === codeB ? drawCode() : b === edB ? drawEditor() : null;
+const UI_BOARDS = [menuB, manB, logB, codeB, edB];
 
 /* ================= 体の向き：正面を合わせる・45度回る ================= */
 function rotateRigAbout(p, a) {
@@ -1928,7 +2100,7 @@ function loadRoom(id) {
   room = Object.assign({ id }, r); scene.add(room.grp); setEra('present');
   needCalib = true; if (!inXR) { dragYaw = 0; dragPitch = 0; }
 }
-const VR_READY = { s1: true, c1: true };   // VR版で作り終えた部屋
+const VR_READY = { s1: true, c1: true, s2: true, c2: true, s3: true, c3: true, c3b: true, s4: true, c4: true, s5: true };   // VR版で作り終えた部屋
 let endShown = false;
 function goRoom(id) {
   busy = true; setLight(null); refreshUI();
@@ -2061,7 +2233,7 @@ function trigger() {
   if (pro) return proAdvance();
   if (introT >= 0) return;
   if (endShown) return toTitle();
-  if (hoverBtn) { const f = hoverBtn.onClick; click(); buzz('right', 0.25, 30); hoverBtn = null; if (hoverBoard) hoverBoard.hover = null; f(); return; }
+  if (hoverBtn) { const f = hoverBtn.onClick; buzz('right', 0.25, 30); hoverBtn = null; if (hoverBoard) hoverBoard.hover = null; f(); return; }
   if (menuOpen || manualOpen || logOpen || codeOpen || editOpen) return;
   if (dlg) return dialogAdvance();
   if (!playing || busy) return;
@@ -2119,7 +2291,7 @@ function hitRoom() {
   return null;
 }
 function hitBoards() {
-  const open = [menuB, manB, logB, codeB].filter(b => b.mesh.visible);
+  const open = UI_BOARDS.filter(b => b.mesh.visible);
   if (!open.length) return null;
   raycaster.set(aimOrigin, aimDir); raycaster.far = 10;
   const hs = raycaster.intersectObjects(open.map(b => b.mesh), false);
@@ -2155,7 +2327,7 @@ function loopFrame(now) {
   rig.updateMatrixWorld(true);
   camera.getWorldPosition(headPos); camera.getWorldDirection(headDir);
   // 狙い：右手。右手がないとき（パソコンなど）は、頭の向き
-  const rh = inXR && hands.right;
+  const rh = handsOn() && hands.right;
   if (rh) { rh.ray.getWorldPosition(aimOrigin); aimDir.set(0, 0, -1).applyQuaternion(rh.ray.getWorldQuaternion(qA)); }
   else { aimOrigin.copy(headPos); aimDir.copy(headDir); }
   readButtons();
@@ -2171,10 +2343,11 @@ function loopFrame(now) {
   if (introT >= 0) { introT += dt; if (Math.floor(introT * 20) % 3 === 0) drawNoise(Math.max(0, 1 - introT / 1.8)); followBoard(bigB, dt); if (introT > 2.0) { introT = -1; beginS1(); } }
   if (endShown) followBoard(bigB, dt);
   if (dlg) { const l = dlg.lines[dlg.i].t; dlg.c = Math.min(l.length, dlg.c + dt * 18); if (Math.floor(dlg.c) !== dlgDrawn) drawDialog(); }
-  for (const b of [dlgB, menuB, manB, logB, codeB]) if (b.mesh.visible && b.follow) followBoard(b, dt);
+  for (const b of [dlgB, ...UI_BOARDS]) if (b.mesh.visible && b.follow) followBoard(b, dt);
+  if (eraT > 0) { eraT -= dt; eraB.mesh.material.opacity = Math.min(1, eraT / 0.4); if (eraT <= 0) { hideBoard(eraB); eraB.mesh.material.opacity = 1; } }
   if (insp) inspTick(dt);
   // 手に取っている間と暗証番号の間は、周りの部屋を暗くする
-  dimS.material.opacity += (((insp && insp.state !== 'out') || codeOpen ? 0.6 : 0) - dimS.material.opacity) * Math.min(1, dt * 6);
+  dimS.material.opacity += (((insp && insp.state !== 'out') || codeOpen || editOpen ? 0.6 : 0) - dimS.material.opacity) * Math.min(1, dt * 6);
   if (manualOpen && manFade < 1) { manFade = Math.min(1, manFade + dt / 3.5); drawManual(); }
   if (menuOpen && hint && now - menuB.t0 < 3500) drawMenu();
   if (flashA > 0) flashA = Math.max(0, flashA - dt * 0.4);
@@ -2187,7 +2360,7 @@ function loopFrame(now) {
   const hb = hitBoards();
   const newHover = hb && hb.btn || null;
   if (hb && hb.board && hb.board.hover !== newHover) { hb.board.hover = newHover; redrawBoard(hb.board); }
-  for (const b of [menuB, manB, logB, codeB]) if (b.hover && (!hb || hb.board !== b)) { b.hover = null; redrawBoard(b); }
+  for (const b of UI_BOARDS) if (b.hover && (!hb || hb.board !== b)) { b.hover = null; redrawBoard(b); }
   hoverBtn = newHover; hoverBoard = hb && hb.board;
 
   let hit = null;
@@ -2213,9 +2386,9 @@ function loopFrame(now) {
   let hitPt = null, dist = 4;
   if (hb && hb.hit) { hitPt = hb.hit.point; dist = hb.hit.distance; }
   else if (hit) { hitPt = hit.point; dist = hit.distance; }
-  beam.visible = !!rh && pointing && (playing || !!hoverBoard || menuOpen || manualOpen || logOpen) && !(insp && !codeOpen);
+  beam.visible = !!rh && pointing && (playing || !!hoverBoard || menuOpen || manualOpen || logOpen) && !(insp && !codeOpen && !editOpen);
   if (beam.visible) { beam.position.copy(aimOrigin); beam.quaternion.setFromUnitVectors(V(0, 0, -1), aimDir); beam.scale.set(1, 1, dist); }
-  dot.visible = pointing && !!hitPt && (playing || menuOpen || manualOpen || logOpen) && !insp && !(lc === 'red' || lc === 'green' || lc === 'white');
+  dot.visible = pointing && !!hitPt && (playing || menuOpen || manualOpen || logOpen) && (!insp || codeOpen || editOpen) && !(lc === 'red' || lc === 'green' || lc === 'white');
   if (dot.visible) {
     const big = aimed || hoverBtn ? 2.2 : 1.2;
     dot.position.copy(hitPt).addScaledVector(aimDir, -0.01); dot.lookAt(headPos);
@@ -2248,9 +2421,22 @@ Promise.race([document.fonts && document.fonts.load ? document.fonts.load('20px 
 // 自動テスト用
 window.__colors = { G, get room() { return room && room.id; }, get aimed() { return aimed; }, get dlg() { return !!dlg; }, get dlgText() { return dlg && dlg.lines[dlg.i].t; },
   get menuOpen() { return menuOpen; }, get manualOpen() { return manualOpen; }, get hint() { return hint; }, get pro() { return !!pro; }, get playing() { return playing; },
-  get insp() { return insp && insp.state; }, get codeOpen() { return codeOpen; }, get hover() { return hoverBtn && hoverBtn.label; }, get light() { return lightColor(); }, get black() { return blackS.material.opacity; }, get endShown() { return endShown; },
+  get insp() { return insp && insp.state; }, codeEnter(v) { codeVal = v.split('').map(Number); closeCode(true); }, keys() { return Object.keys(room.targets); }, act(k) { return room.targets[k].act(); }, ex(k) { room.targets[k].examine(); }, get ghostSeen() { return Object.keys(G.flags.seen).filter(k => k.startsWith('ghost')); }, get editOpen() { return editOpen; }, get era() { return era; }, edPick(i, ch) { ed.sel = i; pickChar(ch); }, edOk() { closeEditor(true); },
+  setPaint(v) { paintMode = v; labelsDirty = true; }, paint(c) { paint(c); }, ph(c, on) { pheld[c] = on; },
+  fakeHands(on) {   // パソコンで手を置いて、コントローラーの形と札を見る
+    fakeHands = on;
+    for (const [i, side] of [[0, 'right'], [1, 'left']]) {
+      const h = ctrls[i]; h.hand = side; hands[side] = on ? h : null;
+      h.src = { profiles: ['meta-quest-touch-plus'], handedness: side, gamepad: { buttons: [0, 1, 2, 3, 4, 5, 6].map(() => ({ pressed: false, value: 0 })), axes: [0, 0, 0, 0] } };
+      const sx = side === 'right' ? 1 : -1;
+      for (const o of [h.grip, h.ray]) { o.position.set(sx * 0.14, -0.28, -0.42); o.rotation.set(0.5, 0, sx * -0.2); o.visible = true; o.updateMatrix(); }
+      if (on) loadCtrlModel(h);
+    }
+  },
+  handInfo() { return ['left','right'].map(k => { const h = hands[k]; if (!h) return null; const w = h.grip.getWorldPosition(V(0,0,0)); return { k, model: !!h.model, vis: h.grip.visible, kids: h.grip.children.length, w: [w.x, w.y, w.z], par: !!h.grip.parent }; }); },
+  gp(side, i, on) { const b = hands[side].src.gamepad.buttons[i]; b.pressed = on; b.value = on ? 1 : 0; }, get codeOpen() { return codeOpen; }, get hover() { return hoverBtn && hoverBtn.label; }, get light() { return lightColor(); }, get black() { return blackS.material.opacity; }, get endShown() { return endShown; },
   lookAt(x, y, z) { const v = V(x, y, z).normalize(); dragYaw = Math.atan2(-v.x, -v.z); dragPitch = Math.asin(v.y); },
-  lookBoardBtn(label) { for (const b of [menuB, manB, logB, codeB]) if (b.mesh.visible) { const t = b.btns.find(x => x.label === label); if (!t) continue;
+  lookBoardBtn(label) { for (const b of UI_BOARDS) if (b.mesh.visible) { const t = b.btns.find(x => x.label === label); if (!t) continue;
       const p = V((t.x + t.w / 2) / b.pw - 0.5, 0.5 - (t.y + t.h / 2) / b.ph, 0).multiply(V(b.mw, b.mw * b.ph / b.pw, 1)); b.mesh.localToWorld(p); this.lookAt(p.x, p.y, p.z); return true; } return false; },
   press(n) { simHeld[n] = true; }, release(n) { simHeld[n] = false; },
   hold(c, on) { if (c === null) setLight(null); else setLight(c, !!on); },
