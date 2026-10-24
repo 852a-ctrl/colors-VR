@@ -145,10 +145,7 @@ function townTexture() {
   g.lineWidth = 1.5; g.beginPath(); g.moveTo(0, 260); g.quadraticCurveTo(170, 300, 170, 240); g.quadraticCurveTo(495, 300, 820, 220); g.quadraticCurveTo(930, 260, 1024, 250); g.stroke();
   townTex = new THREE.CanvasTexture(cv); townTex.anisotropy = 4; return townTex;
 }
-function townBehind(grp, x, y, z, w, h) {
-  const t = new THREE.Mesh(new THREE.PlaneGeometry(w, h), new THREE.MeshBasicMaterial({ map: townTexture() })); t.position.set(x, y, z); grp.add(t);
-  const s = new THREE.Mesh(new THREE.PlaneGeometry(w * 4, h * 5), new THREE.MeshBasicMaterial({ color: 0xffffff })); s.position.set(x, y, z - 0.1); grp.add(s);
-}
+function townBehind(grp, x, y, z, w, h) { townLayers(grp, x, y, z, w, h); }
 // 文字の板。白いふち取りで、どの背景でも読める
 function textPlane(text, color, wid, opt) {
   opt = opt || {};
@@ -233,7 +230,7 @@ function makeGhost() {
   body.computeLineDistances(); g.add(body);
   const arm = new THREE.Group(); arm.position.set(0, 1.28, 0); g.add(arm);
   const al = segs([[0, 0, 0], [0.27, -0.4, 0]], mat); al.computeLineDistances(); arm.add(al);
-  return { g, mat, arm };
+  const gh = { g, mat, arm, last: null }; GHOSTS.push(gh); return gh;
 }
 // 歩く道：点をつなぎ、stops の点では pause 秒止まる。最後に endPause 秒止まって最初に戻る
 function makeRoute(pts, stops, pause, endPause, speed) {
@@ -265,6 +262,7 @@ function corridor(color, opt) {
     for (const k in extra || {}) holes[k].push(...extra[k]);
     for (const s of ['front', 'back', 'left', 'right']) sh.place(s, holes[s]);
     townBehind(sh.grp, -1.3, 0.2, -D - 2.2, 6, 3);
+    crackSlot(sh.grp, crack, D);
     const seam = [], ml = lineMat(0x8a8a8a);
     for (const x of [-2, -1, 0, 1, 2]) { if (Math.abs(x - crack.x) > 0.2 && !holes.front.some(h => Math.abs(h.x - x) < h.w / 2 + 0.05)) seam.push([x, FLOOR, -D + 0.003], [x, CEIL, -D + 0.003]); seam.push([x, FLOOR, D - 0.003], [x, CEIL, D - 0.003]); }
     for (const z of [-0.75, 0.75]) seam.push([-W + 0.003, FLOOR, z], [-W + 0.003, CEIL, z], [W - 0.003, FLOOR, z], [W - 0.003, CEIL, z]);
@@ -337,7 +335,7 @@ const ROOMS = {
         examine() {
           say('私のいた町だ。どうにかして脱出したい。', () => {
             if (F.ev.s1_open) return;
-            F.ev.s1_open = true; quake(1.2); rumble(1.4);
+            F.ev.s1_open = true; quake(1.2); rumble(1.4, false, V(W, FLOOR + 1.0, 0));
             setTimeout(() => { door.g.visible = true; drawn.v = 0.0001; }, 500);
           }, !F.ev.s1_open);
         } },
@@ -376,7 +374,7 @@ const ROOMS = {
           if (F.ev.c1_door_open) { goRoom('s2'); return; }
           openCode('1', v => {
             if (v !== '0') { say('……扉は動かない。'); return; }
-            F.ev.c1_door_open = true; ribL.visible = false; quake(0.5); rumble(0.9); fadeDark(door.dark, 0.9);
+            F.ev.c1_door_open = true; ribL.visible = false; quake(0.5); rumble(0.9, false, door.g.position); fadeDark(door.dark, 0.9);
             say(['扉が開いた。赤い光を当てると文字や数字が見えるみたいだ。', 'しかも、書かれた言葉の通りになるのか。'], null, true);
           });
         } }
@@ -408,6 +406,7 @@ const ROOMS = {
     cal.add(segs(ce)); cal.add(segs([[0, 0.3, 0.008], [0, 0.36, 0.008]]));
     const calPos = V(1.0, 0.25, -D);
     placeOn(cal, 'front', W, D, 1.0, 1.65); sh.grp.add(cal);
+    const calHomeP = cal.position.clone(), calHomeQ = cal.quaternion.clone();
     cal.visible = !F.ev.s2_cal_off;
     // 箱（右後ろの角）と、空の箱（左後ろの角）
     const box = makeCrate(0.6); const boxHome = V(1.75, FLOOR + 0.3, 1.75); box.g.position.copy(boxHome); box.g.lookAt(0, boxHome.y, 0); sh.grp.add(box.g);
@@ -426,8 +425,12 @@ const ROOMS = {
       cal: { pos: calPos, act: () => !F.ev.s2_cal_off, hidden: 's2_cal', label: lb('「はずせる」', V(1.0, 0.25, -D + 0.12)),
         examine() {
           if (!F.seen.s2_cal) { say('壁掛けのカレンダーだ。'); return; }
-          F.ev.s2_cal_off = true; cal.visible = false; say('外した。');
-        } },
+          say('「はずせる」');
+        },
+        // VR：「はずせる」を見たあと、つかんで引きはがす。離すと床に落ちる（引きはがす前に離すと、壁に戻る）
+        grab: { obj: cal, can: () => !!F.seen.s2_cal && !F.ev.s2_cal_off,
+          onMove: (p, d) => { if (d > 0.18 && !F.ev.s2_cal_off) { F.ev.s2_cal_off = true; rumble(0.25, false, calPos); } },
+          onRelease: o => { if (F.ev.s2_cal_off) { o.userData.flat = true; dropToFloor(o); } else returnHome(o, calHomeP, calHomeQ); } } },
       calBack: { pos: calPos.clone(), act: () => !!F.ev.s2_cal_off, hidden: 's2_cal_back', label: lb('「9」', V(1.0, 0.25, -D + 0.12)),
         examine() { say(F.seen.s2_cal_back ? '「9」' : 'カレンダーがかかっていた壁だ。'); } },
       box: { pos: boxHome.clone(), act: () => true, hidden: 's2_box', label: lb('「2」', V(1.75, FLOOR + 0.9, 1.75)),
@@ -439,7 +442,7 @@ const ROOMS = {
           if (F.ev.s2_door_open) { goRoom('c2'); return; }
           const ask = () => openCode('00', v => {
             if (v !== '54') { say('……扉は動かない。'); return; }
-            F.ev.s2_door_open = true; quake(0.5); rumble(0.9); fadeDark(door.dark, 0.9); say('扉が開いた。');
+            F.ev.s2_door_open = true; quake(0.5); rumble(0.9, false, door.g.position); fadeDark(door.dark, 0.9); say('扉が開いた。');
           });
           ask();
         } }
@@ -462,7 +465,7 @@ const ROOMS = {
           if (F.ev.c2_door_open) { goRoom('s3'); return; }
           openCode('00', v => {
             if (v !== '21') { say('……扉は動かない。'); return; }
-            F.ev.c2_door_open = true; quake(0.5); rumble(0.9); fadeDark(door.dark, 0.9);
+            F.ev.c2_door_open = true; quake(0.5); rumble(0.9, false, door.g.position); fadeDark(door.dark, 0.9);
             say(['扉が開いた。緑の光を当てるとものの見え方が変わるみたいだ。', '・・・', 'この空間は何なんだろう？', '誰かが作ったのか？'], null, true);
           });
         } }
@@ -508,7 +511,7 @@ const ROOMS = {
       sw: { pos: swPos, act: () => !!F.seen.s3_sw,
         examine() {
           if (F.ev.s3_pressed) { say('スイッチは押されている。'); return; }
-          F.ev.s3_pressed = true; sw.position.z = -0.23; rumble(0.8); quake(0.4);
+          F.ev.s3_pressed = true; sw.position.z = -0.23; rumble(0.8, false, swPos); quake(0.4);
           setTimeout(() => { box.g.visible = true; box.g.scale.setScalar(0.01); box.appear = 0; }, 400);
         } },
       box: { pos: boxHome.clone(), act: () => !!F.ev.s3_pressed && box.appear == null,
@@ -532,7 +535,7 @@ const ROOMS = {
           if (F.ev.s3_door_open) { goRoom('c3'); return; }
           openCode('00', v => {
             if (v !== '45') { say('……扉は動かない。'); return; }
-            F.ev.s3_door_open = true; quake(0.5); rumble(0.9); fadeDark(door.dark, 0.9); say('扉が開いた。');
+            F.ev.s3_door_open = true; quake(0.5); rumble(0.9, false, door.g.position); fadeDark(door.dark, 0.9); say('扉が開いた。');
           });
         } }
     };
@@ -604,7 +607,7 @@ const ROOMS = {
         examine() {
           if (F.ev.c3_door_open) { goRoom('s4'); return; }
           if (!F.seen.c3_door) { say('扉は閉まっている。'); return; }
-          say('「開く」', () => { F.ev.c3_door_open = true; quake(0.5); rumble(0.9); fadeDark(door.dark, 0.9); say('扉が開いた。青い光を出すと過去が見えるのか？', null, true); });
+          say('「開く」', () => { F.ev.c3_door_open = true; quake(0.5); rumble(0.9, false, door.g.position); fadeDark(door.dark, 0.9); say('扉が開いた。青い光を出すと過去が見えるのか？', null, true); });
         } }
     };
     return { grp: sh.grp, targets };
@@ -653,34 +656,40 @@ const ROOMS = {
     const gh = makeGhost(); sh.grp.add(gh.g);
     const route = makeRoute([[-2.3, 0.2], STOPS[0], STOPS[1], STOPS[2], [-2.3, 0.6]], [1, 2, 3], 1.4, 1.0, 1.3);
     let chestOpen = null, paperRise = null, keyPop = null, clock = 0, seq = 0, prevC = null;
+    const chestLock = V(0, 0.1, 0.235).applyQuaternion(chest.quaternion).add(chestHome);
+    const openChest = () => { F.ev.s4_chest_open = true; chestOpen = 0; rumble(0.6, false, chestHome); setTimeout(() => { paper.visible = true; paperRise = 0; }, 500); };
     const targets = {
       chest: { pos: chestHome.clone().add(V(0, 0.1, 0)), act: () => !F.ev.s4_chest_open,
         examine() {
           if (!F.ev.hasKey) { say('鍵がかかっている。'); return; }
-          F.ev.s4_chest_open = true; chestOpen = 0; rumble(0.6);
-          setTimeout(() => { paper.visible = true; paperRise = 0; }, 500);
+          openChest();
         } },
       paper: { pos: paperPos, act: () => !!F.ev.s4_chest_open && paperRise == null, hidden: 's4_paper', label: paperLab,
         examine() {
           if (!F.seen.s4_paper) { say('白紙の紙だ。'); return; }
           say('「扉の前で「過去」を「見て」「文字」を探せ」', () => { F.ev.s4_hint = true; });
         } },
-      key: { pos: keyPos.clone().add(V(0, 0.05, 0)), act: () => !!F.ev.s4_key && !F.ev.hasKey,
-        examine() { F.ev.hasKey = true; key.visible = false; say('鍵を拾った'); } },
+      key: { pos: keyPos.clone().add(V(0, 0.05, 0)), act: () => !!F.ev.s4_key && !F.ev.hasKey && keyPop == null,
+        examine() { say('鍵だ。'); },
+        // VR：つかんで宝箱の鍵穴に近づけると、さしこまれて開く。ほかで離すと床に落ちる
+        grab: { obj: key, can: () => true,
+          onMove: p => (p.distanceTo(chestLock) < 0.35 ? 'done' : null),
+          onSnap: () => { F.ev.hasKey = true; key.visible = false; click(chestLock); openChest(); },
+          onRelease: o => dropToFloor(o, () => targets.key.pos.copy(o.position).add(V(0, 0.05, 0))) } },
       door: { pos: doorPos, act: () => true, hidden: 's4_door', label: doorLab, noLight: true, canSee: () => !F.ev.s4_door_open,
         examine() {
           if (F.ev.s4_door_open) { goRoom('c4'); return; }
           if (!F.seen.s4_door) { say('扉は閉まっている。'); return; }
-          say('「開く」', () => { F.ev.s4_door_open = true; quake(0.5); rumble(0.9); fadeDark(door.dark, 0.9); say('扉が開いた。'); });
+          say('「開く」', () => { F.ev.s4_door_open = true; quake(0.5); rumble(0.9, false, door.g.position); fadeDark(door.dark, 0.9); say('扉が開いた。'); });
         } }
     };
     btns.forEach(bt => {
       targets['btn' + bt.i] = { pos: bt.pos, act: () => !!F.seen['s4_btn' + bt.i] && !F.ev.s4_key,
         examine() {
-          bt.pulse = 1; click();
+          bt.pulse = 1; click(bt.pos);
           const p = F.ev.bprog || 0;
           if (bt.i === p) F.ev.bprog = p + 1; else F.ev.bprog = (bt.i === 0) ? 1 : 0;
-          if (F.ev.bprog >= 3) { F.ev.s4_key = true; F.ev.bprog = 0; key.visible = true; keyPop = 0; rumble(0.5); say('鍵が現れた。'); }
+          if (F.ev.bprog >= 3) { F.ev.s4_key = true; F.ev.bprog = 0; key.visible = true; keyPop = 0; rumble(0.5, false, keyPos); say('鍵が現れた。'); }
         } };
     });
     const tick = dt => {
@@ -737,19 +746,27 @@ const ROOMS = {
     const gh = makeGhost(); gh.g.position.set(-0.35, FLOOR, -D + 0.45); sh.grp.add(gh.g);
     const termPos = V(0, -0.25, -D);
     let bulkOpen = null, backDrop = null, callT = null;
+    // VR：端末のカバー（過去の人が外していた所）。外すと奥にスイッチ
+    const cover = new THREE.Group();
+    cover.add(new THREE.Mesh(new THREE.PlaneGeometry(0.44, 0.3), faceMat(0xd6d6d6)));
+    cover.add(segs([...rect2(-0.22, -0.15, 0.22, 0.15, 0.002), ...[[-0.19, -0.12], [0.19, -0.12], [-0.19, 0.12], [0.19, 0.12]].flatMap(([x, y]) => [[x - 0.012, y, 0.003], [x + 0.012, y, 0.003], [x, y - 0.012, 0.003], [x, y + 0.012, 0.003]])]));
+    const coverP = V(0, -0.43, -D + 0.165), coverQ = new THREE.Quaternion();
+    cover.position.copy(coverP); sh.grp.add(cover); cover.visible = !F.ev.c4_cover_off;
+    const swc = solidBox(0.12, 0.08, 0.02, 0xffffff); swc.position.set(0, -0.43, -D + 0.15); sh.grp.add(swc); swc.visible = !!F.ev.c4_cover_off;
     const lockEdit = { text: 'ロックはオンになっている', goal: 'ロックはオフになっている', flag: 'lockOff',
-      done() { F.ev.lockOff = true; quake(0.8); rumble(1.0, true); bulkOpen = 0; say(['ロックはオフになっている', '隔壁が開いた。']); } };
+      done() { F.ev.lockOff = true; quake(0.8); rumble(1.0, true, wallPos('right', W, D, 0.15, 1.0)); bulkOpen = 0; say(['ロックはオフになっている', '隔壁が開いた。']); } };
     const targets = Object.assign(C.targets, {
       term: { pos: termPos, act: () => true,
         examine() {
           if (!F.ev.c4_closed) {
-            F.ev.c4_closed = true; rumble(1.2); back.g.visible = true; back.plate.position.y = 2.1; backDrop = 0;
+            F.ev.c4_closed = true; rumble(1.2, false, V(-W, FLOOR + 1.0, 0)); back.g.visible = true; back.plate.position.y = 2.1; backDrop = 0;
             say(C4_TALK, () => { F.ev.c4_gone = true; callT = 0; }, true);
             return;
           }
           if (!F.seen.ghost_c4) { say('端末は静かに光っている。'); return; }
           if (!F.ev.c4_cover) {
-            say(['誰かがカバーを外していた。外してみよう。', '奥にスイッチがある。怪しいが押してみるか。'], () => {
+            if (!F.ev.c4_cover_off) { say('誰かがカバーを外していた。外してみよう。', null, true); return; }
+            say('奥にスイッチがある。怪しいが押してみるか。', () => {
               F.ev.c4_cover = true; F.ev.c4_lit = true; quake(1.2); rumble(1.4, true); C.termMats[2].color.set(0xffffff);
               say('バチッ！！', () => say(C4_LETTER, () => {
                 F.redPaint = true; showButton('btnMode'); startHint(false);
@@ -760,6 +777,11 @@ const ROOMS = {
           say('端末は静かに光っている。');
         } },
       back: { pos: V(-W, FLOOR + 1.0, 0), act: () => !!F.ev.c4_closed, examine() { say('来た道は閉ざされている。'); } },
+      // VR：過去の人を見たあと、カバーをつかんで引きはがす
+      cover: { pos: coverP.clone(), act: () => !!F.seen.ghost_c4 && !F.ev.c4_cover_off, examine() { targets.term.examine(); },
+        grab: { obj: cover, can: () => true,
+          onMove: (p, d) => { if (d > 0.15 && !F.ev.c4_cover_off) { F.ev.c4_cover_off = true; swc.visible = true; rumble(0.3, false, coverP); } },
+          onRelease: o => { if (F.ev.c4_cover_off) { o.userData.flat = true; dropToFloor(o); } else returnHome(o, coverP, coverQ); } } },
       lock: { pos: lockPos, act: () => true, hidden: 'c4_lock', label: lockLab, canSee: () => !!F.redPaint, edit: lockEdit,
         examine() {
           if (F.seen.c4_lock) say(F.ev.lockOff ? '「ロックはオフになっている」' : '「ロックはオンになっている」');
@@ -883,14 +905,18 @@ const ROOMS = {
           if (era === 'past') { say('箱だ。閉じている。'); return; }
           if (!F.ev.tbox_open) { say(F.seen.s5_tbox ? '「はこがある」' : '古びた箱だ。'); return; }
           // 開いた箱：手元に引き寄せると、中に鍵が見える。調べると拾う
-          inspect(crate, TB, { examineHeld: () => (!F.ev.hasKey && !F.ev.s5_door) ? () => { F.ev.hasKey = true; key.visible = false; say('鍵を拾った'); } : null });
+          // VR：箱の中の鍵をつかんで取り出す（箱から離すと拾う。途中で離すと箱に戻る）
+          inspect(crate, TB, { parts: [{ obj: key, can: () => !F.ev.hasKey && !F.ev.s5_door,
+            onMove: (p, d) => (d > 0.15 ? 'done' : null),
+            onSnap: () => { F.ev.hasKey = true; key.visible = false; crate.g.attach(key); say('鍵を拾った'); },
+            onRelease: o => { crate.g.attach(o); o.position.set(0, -0.2, 0); o.quaternion.identity(); } }] });
         } },
       keyhole: { pos: khPos, act: () => era === 'present' && !!F.seen.ghost_s5 && (!!F.seen.s5_kh_d || !!F.ev.kh_real) && !F.ev.s5_door,
         get real() { return era === 'present' ? KH_REAL : null; },
         examine() {
           if (!F.ev.kh_real) { say('透明な何かがある。'); return; }
           if (!F.ev.hasKey) { say('壁に鍵穴がある。'); return; }
-          F.ev.hasKey = false; F.ev.s5_door = true; quake(0.8); rumble(1.0);
+          F.ev.hasKey = false; F.ev.s5_door = true; quake(0.8); rumble(1.0, false, khPos);
           say('鍵をさした。壁に扉があらわれた。', null, true);
         } },
       door: { pos: DP, act: () => era === 'present' && !!F.ev.s5_door, hidden: 's5_door', label: doorLab, canSee: () => !F.ev.s5_melt,
@@ -1058,9 +1084,9 @@ const ROOMS = {
       wbg.material.opacity += ((glit && !F.ev.wbtn_real ? 1 : 0) - wbg.material.opacity) * Math.min(1, dt * 8); wbg.visible = wbg.material.opacity > 0.02;
       wbt.visible = !!F.ev.wbtn_real && era === 'future';
       crateTick(lbox, dt);
-      $('night').style.opacity = F.ev.s6_day ? 0 : 1;
+      nightOn = !F.ev.s6_day;
     };
-    return { grp: sh.grp, targets, tick, time: true, onLeave: () => { $('night').style.opacity = 0; } };
+    return { grp: sh.grp, targets, tick, time: true, onLeave: () => { nightOn = false; } };
   },
 
   // ---- 通路6：手前の扉「とびらがみえている」→「きえている」、奥の扉「あなた＜とびら」→「＞」で壊す ----
@@ -1181,7 +1207,8 @@ const ROOMS = {
       bridge: { pos: BP.clone().add(V(0, 0.5, 0.36)), act: () => !!F.ev.s8_bridge && !F.ev.s8_ladder, hidden: 's8_bridge', label: brLab,
         edit: { text: 'はし', blank: true, goal: 'はしご', flag: 's8_ladder', done() { F.ev.s8_ladder = true; say('上に行けってことなのか？', null, true); } },
         examine() { say(F.seen.s8_bridge ? '「はし」' : '部屋の真ん中に橋がある。'); } },
-      ladder: { pos: BP.clone().add(V(0, 1.2, 0)), act: () => !!F.ev.s8_ladder, examine() { say('はしごだ。上に登ってみよう。', () => climb(), true); } }
+      ladder: { pos: BP.clone().add(V(0, 1.2, 0)), act: () => !!F.ev.s8_ladder, grab: Object.assign(climbGrab(), { obj: ladder }),
+        examine() { if (climbing) return; say('はしごだ。上に登ってみよう。', () => climb(), true); } }
     };
     const tick = dt => {
       fWin.visible = !F.ev.s8_win_gone; fPlain.visible = !!F.ev.s8_win_gone; frame.visible = townG.visible = !F.ev.s8_win_gone;
@@ -1324,6 +1351,49 @@ function crateTick(box, dt) {
 }
 const ease = t => t * t * (3 - 2 * t);
 
+/* ================= VR：奥行きのある町と、通路の隙間 ================= */
+// 町：近い町並み・中くらい・遠く、の3枚を離して重ねる。頭を動かすと、少し見え方が変わる
+const townLayerTexs = {};
+function townLayerTex(k) {
+  if (townLayerTexs[k]) return townLayerTexs[k];
+  const cv = document.createElement('canvas'); cv.width = 1024; cv.height = 512; const g = cv.getContext('2d');
+  let seed = [7, 23, 41][k]; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  if (k === 2) { g.fillStyle = '#fff'; g.fillRect(0, 0, 1024, 512); }
+  const base = [512, 470, 440][k], hmin = [70, 120, 150][k], hrng = [120, 160, 190][k], stroke = ['#000', '#777', '#b4b4b4'][k], lw = [3, 2, 2][k];
+  for (let x = -20; x < 1040;) {
+    const w = (k === 0 ? 90 : 55) + rnd() * (k === 0 ? 110 : 70), h = hmin + rnd() * hrng;
+    g.fillStyle = '#fff'; g.fillRect(x, base - h, w, h); g.strokeStyle = stroke; g.lineWidth = lw; g.strokeRect(x, base - h, w, h);
+    if (k < 2) { g.lineWidth = k === 0 ? 2 : 1.5; for (let yy = base - h + 16; yy < base - 28; yy += k === 0 ? 30 : 24) for (let xx = x + 12; xx < x + w - 20; xx += k === 0 ? 26 : 20) g.strokeRect(xx, yy, k === 0 ? 12 : 8, k === 0 ? 14 : 10); }
+    x += w + (k === 0 ? 30 + rnd() * 60 : 6 + rnd() * 14);
+  }
+  if (k === 0) {   // 電柱と電線（いちばん手前）
+    g.strokeStyle = '#000'; g.lineWidth = 3; g.beginPath(); g.moveTo(170, 512); g.lineTo(170, 230); g.moveTo(820, 512); g.lineTo(820, 210); g.stroke();
+    g.lineWidth = 1.5; g.beginPath(); g.moveTo(0, 260); g.quadraticCurveTo(170, 300, 170, 240); g.quadraticCurveTo(495, 300, 820, 220); g.quadraticCurveTo(930, 260, 1024, 250); g.stroke();
+  }
+  const t = new THREE.CanvasTexture(cv); t.anisotropy = 4; townLayerTexs[k] = t; return t;
+}
+function townLayers(grp, x, y, z, w, h) {
+  const d0 = -z;
+  [[0, 0, 1.1], [1, 3, 1.25], [2, 9, 1.6]].forEach(([k, extra, wide]) => {
+    const s = (d0 + extra) / d0;   // 遠いほど大きくして、窓から見える広さをそろえる
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(w * s * wide, h * s), new THREE.MeshBasicMaterial({ map: townLayerTex(k), alphaTest: k === 2 ? 0 : 0.5, transparent: false }));
+    m.position.set(x * s, y * s, z - extra); grp.add(m);
+  });
+  const sky = new THREE.Mesh(new THREE.PlaneGeometry(w * 12, h * 12), new THREE.MeshBasicMaterial({ color: 0xffffff })); sky.position.set(x, y, z - 9.2); grp.add(sky);
+}
+// 通路の隙間：壁の奥へ45cmの溝。奥に透明な壁。顔を近づけると奥がよく見える
+function crackSlot(grp, c, D) {
+  const dep = 0.45, hw = c.w / 2, cy = FLOOR + c.y, hh = c.h / 2, zc = -D - dep / 2, m = faceMat(0xb8b8b8);
+  for (const sx of [-1, 1]) { const p = new THREE.Mesh(new THREE.PlaneGeometry(dep, c.h), m); p.rotation.y = Math.PI / 2; p.position.set(c.x + sx * hw, cy, zc); grp.add(p); }
+  for (const sy of [-1, 1]) { const p = new THREE.Mesh(new THREE.PlaneGeometry(c.w, dep), m); p.rotation.x = Math.PI / 2; p.position.set(c.x, cy + sy * hh, zc); grp.add(p); }
+  const zb = -D - dep, L = [];
+  for (const [sx, sy] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) L.push([c.x + sx * hw, cy + sy * hh, -D], [c.x + sx * hw, cy + sy * hh, zb]);
+  L.push(...rect2(c.x - hw, cy - hh, c.x + hw, cy + hh, zb));
+  grp.add(segs(L, lineMat(0x3a3a3a)));
+  const glass = new THREE.Mesh(new THREE.PlaneGeometry(c.w, c.h), new THREE.MeshBasicMaterial({ color: 0xcfe0ea, transparent: true, opacity: 0.28, depthWrite: false }));
+  glass.position.set(c.x, cy, zb + 0.002); grp.add(glass);
+}
+
 /* ================= VR：頭・手・狙い ================= */
 // rig（体）の中に、頭（camera）と両手がある。部屋は動かさず、体を回す・ずらす
 const xr = renderer.xr;
@@ -1381,17 +1451,18 @@ function loadCtrlModel(h) {
     setupModel(h, root, hand); h.grip.add(root); labelsDirty = true;
   }).catch(() => {});
 }
-const BTN_COL = { red: 0xe02424, green: 0x1fb04c, blue: 0x2f5bff, white: 0xf2f2f2, gray: 0x9a9a9a };
+const BTN_COL = { red: 0xe02424, green: 0x1fb04c, blue: 0x2f5bff, white: 0xf7f7f7 };
+const BODY_COL = 0xdcdcdc, PART_COL = 0x8a8a8a;   // 本体は明るい灰色、ボタンとスティックは少し濃い灰色
 function setupModel(h, root, hand) {
-  const nodes = {};
-  root.traverse(o => {
-    nodes[o.name] = o;
-    if (o.isMesh) {   // 部屋に明かりがないので、明かりのいらない描き方にする
-      const m0 = o.material;
-      o.material = new THREE.MeshBasicMaterial({ map: m0.map || null, color: m0.map ? 0xffffff : 0x666666 });
-      o.userData.map = m0.map || null; o.renderOrder = 6;
-    }
-  });
+  const nodes = {}, meshes = [];
+  root.traverse(o => { nodes[o.name] = o; if (o.isMesh) meshes.push(o); });
+  for (const o of meshes) {   // 部屋と同じ「白地に黒い線画」にする
+    const body = o.name === 'controller_mesh';
+    o.material = new THREE.MeshBasicMaterial({ color: body ? BODY_COL : PART_COL, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 });
+    o.userData.base = body ? BODY_COL : PART_COL; o.renderOrder = 6;
+    const e = new THREE.LineSegments(new THREE.EdgesGeometry(o.geometry, 38), new THREE.LineBasicMaterial({ color: 0x000000 }));
+    e.renderOrder = 7; o.add(e);
+  }
   const comps = [];
   const add = (prefix, idx, axis) => { const v = nodes[prefix + '_pressed_value'], mn = nodes[prefix + '_pressed_min'], mx = nodes[prefix + '_pressed_max']; if (v && mn && mx) comps.push({ v, mn, mx, idx, axis }); };
   add('xr_standard_trigger', 0); add('xr_standard_squeeze', 1); add('xr_standard_thumbstick', 3);
@@ -1403,9 +1474,8 @@ function setupModel(h, root, hand) {
 function paintPart(h, key, col, on) {
   const m = h.model && h.model.parts[key]; if (!m) return;
   const sig = col + ':' + on; if (h.model.cols[key] === sig) return; h.model.cols[key] = sig;
-  if (col == null) { m.material.map = m.userData.map; m.material.color.set(m.userData.map ? 0xffffff : 0x666666); }
-  else { m.material.map = null; m.material.color.set(col); if (on) m.material.color.lerp(new THREE.Color(0xffffff), 0.45); }
-  m.material.needsUpdate = true;
+  m.material.color.set(col == null ? m.userData.base : col);
+  if (on) m.material.color.lerp(new THREE.Color(0xffffff), col == null ? 0.3 : 0.45);
 }
 function animModel(h) {
   const md = h.model, gp = h.src && h.src.gamepad; if (!md || !gp) return;
@@ -1414,14 +1484,17 @@ function animModel(h) {
     c.v.position.lerpVectors(c.mn.position, c.mx.position, v); c.v.quaternion.slerpQuaternions(c.mn.quaternion, c.mx.quaternion, v);
   }
   const F = G.flags, pr = i => !!(gp.buttons[i] && gp.buttons[i].pressed);
+  const np = !!(room && room.noPower);   // 最終ステージ：色が抜けて灰色に戻る
   if (h.hand === 'right') {
     paintPart(h, 'trig', F.ev.ctrlSeen ? BTN_COL.white : null, pr(0));
-    paintPart(h, 'a', F.red ? BTN_COL.red : null, pr(4));
-    paintPart(h, 'b', F.green ? BTN_COL.green : null, pr(5));
-    paintPart(h, 'grip', F.blue ? BTN_COL.blue : null, pr(1));
+    paintPart(h, 'a', F.red && !np ? BTN_COL.red : null, pr(4));
+    paintPart(h, 'b', F.green && !np ? BTN_COL.green : null, pr(5));
+    paintPart(h, 'grip', F.blue && !np ? BTN_COL.blue : null, pr(1));
+    paintPart(h, 'stick', null, pr(3));
   } else {
     const blink = !!(hint && Math.floor((performance.now() - hint.t0) / 550) % 2 === 0 && performance.now() - hint.t0 < 3300);
     paintPart(h, 'b', blink ? BTN_COL.white : null, pr(5));
+    paintPart(h, 'a', null, pr(4)); paintPart(h, 'stick', null, pr(3)); paintPart(h, 'trig', null, pr(0)); paintPart(h, 'grip', null, pr(1));
   }
 }
 
@@ -1459,6 +1532,11 @@ function headSphere(r, order) {
   m.renderOrder = order; camera.add(m); return m;
 }
 const eraS = headSphere(0.34, 18), blueS = headSphere(0.33, 19), flashS = headSphere(0.32, 20), blackS = headSphere(0.3, 90);
+const nightS = headSphere(0.345, 17); nightS.material.color.set(0x0a1446);   // 2-2：昼になるまでの夜の暗さ
+const whiteS = headSphere(0.31, 87); whiteS.material.color.set(0xffffff);   // 円の場面の白
+// 部屋の外側をおおう白（パススルーのときは、これを消すと本物の周りが見える）
+const skyS = new THREE.Mesh(new THREE.SphereGeometry(40, 24, 12), new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.BackSide, transparent: true, opacity: 1, depthWrite: false }));
+skyS.renderOrder = -10; scene.add(skyS);
 blueS.material.color.set(0x2855ff);
 blackS.material.opacity = 1;
 
@@ -1558,30 +1636,49 @@ function drawNoise(k) {
 /* ---- 手の札：手を見ると、ボタンから線がのびて、そのボタンでできることが出る ---- */
 let labelsDirty = true;
 const TAG_N = 7, TAG_W = 0.12;
+// 線の先の白い丸（黒いふち）
+const dotTex = (() => { const c = document.createElement('canvas'); c.width = c.height = 64; const g = c.getContext('2d');
+  g.fillStyle = '#fff'; g.beginPath(); g.arc(32, 32, 26, 0, Math.PI * 2); g.fill(); g.lineWidth = 8; g.strokeStyle = '#000'; g.stroke(); return new THREE.CanvasTexture(c); })();
+function makeRibbon(col, order) {
+  const geo = new THREE.BufferGeometry(); geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(TAG_N * 12), 3));
+  const idx = []; for (let i = 0; i < TAG_N; i++) { const o = i * 4; idx.push(o, o + 1, o + 2, o + 2, o + 1, o + 3); } geo.setIndex(idx);
+  const m = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: col, depthTest: false, depthWrite: false, side: THREE.DoubleSide, transparent: true }));
+  m.renderOrder = order; m.frustumCulled = false; m.visible = false; scene.add(m); return m;
+}
 function makeTagSet() {
   const tags = [];
-  for (let i = 0; i < TAG_N; i++) { const b = makeBoard(440, 84, TAG_W, 57); b.follow = false; b.sig = ''; tags.push(b); }
-  const lg = new THREE.BufferGeometry(); lg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(TAG_N * 6), 3));
-  const lines = new THREE.LineSegments(lg, new THREE.LineBasicMaterial({ color: 0x222222, depthTest: false, transparent: true, opacity: 0.9 }));
-  lines.renderOrder = 56; lines.frustumCulled = false; lines.visible = false; scene.add(lines);
-  return { tags, lines };
+  for (let i = 0; i < TAG_N; i++) { const b = makeBoard(440, 84, TAG_W, 58); b.follow = false; b.sig = ''; tags.push(b); }
+  // 札を指す線：白いふちのついた黒い線（細い帯を2本重ねる）
+  const outer = makeRibbon(0xffffff, 55), inner = makeRibbon(0x000000, 56);
+  const dots = tags.map(() => { const m = new THREE.Mesh(new THREE.CircleGeometry(1, 20), new THREE.MeshBasicMaterial({ map: dotTex, transparent: true, depthTest: false, depthWrite: false }));
+    m.renderOrder = 57; m.scale.setScalar(0.0065); m.visible = false; scene.add(m); return m; });
+  return { tags, outer, inner, dots };
 }
 const tagSets = { left: makeTagSet(), right: makeTagSet() };
+const rbA = V(0, 0, 0), rbS = V(0, 0, 0);
+function setRibbon(mesh, i, a, b, w) {
+  const pos = mesh.geometry.attributes.position;
+  rbA.copy(b).sub(a); rbS.copy(headPos).sub(a); rbS.crossVectors(rbA, rbS).normalize().multiplyScalar(w / 2);
+  pos.setXYZ(i * 4, a.x + rbS.x, a.y + rbS.y, a.z + rbS.z); pos.setXYZ(i * 4 + 1, a.x - rbS.x, a.y - rbS.y, a.z - rbS.z);
+  pos.setXYZ(i * 4 + 2, b.x + rbS.x, b.y + rbS.y, b.z + rbS.z); pos.setXYZ(i * 4 + 3, b.x - rbS.x, b.y - rbS.y, b.z - rbS.z);
+}
 // [ボタンの場所, 字, 色]。場所がnullの札は線を引かない
 function handRows() {
   const F = G.flags, pm = paintMode;
   const R = [], L = [];
   if (F.ev.ctrlSeen) R.push(['trig', '調べる', '#fff']);
-  if (F.red) R.push(['a', pm ? '赤色' : '赤', '#ff5a5a']);
-  if (F.green) R.push(['b', pm && F.paintGB ? '緑色' : '緑', '#3fd06a']);
-  if (F.blue) R.push(['grip', pm && F.paintGB ? '青色' : '青', '#7f9bff']);
-  if (pm && F.ev.blackReady) R.push([null, 'A・B・握る：黒色', '#fff']);
+  const np = !!(room && room.noPower);
+  if (F.red && !np) R.push(['a', pm ? '赤色' : '赤', '#ff5a5a']);
+  if (F.green && !np) R.push(['b', pm && F.paintGB ? '緑色' : '緑', '#3fd06a']);
+  if (gAim) R.push(['grip', climbing ? '人差し指＋中指で握って、下に引く' : '人差し指＋中指：つかむ', '#fff']);
+  else if (F.blue && !np) R.push(['grip', pm && F.paintGB ? '青色' : '青', '#7f9bff']);
+  if (np) {}
+  else if (pm && F.ev.blackReady) R.push([null, 'A・B・握る：黒色', '#fff']);
   else if (!pm && F.white) R.push([null, 'A・B・握る：白い光', '#fff']);
   R.push(['stick', '左右に倒す：回る', '#bbb']);
   const blink = !!(hint && Math.floor((performance.now() - hint.t0) / 550) % 2 === 0 && performance.now() - hint.t0 < 3300);
   L.push(['b', 'メニュー' + (hint && hint.required ? '　←' : ''), '#fff', blink]);
-  if (F.redPaint) L.push(['a', pm ? '光⇄［色］' : '［光］⇄色', '#fff']);
-  if (insp && insp.state === 'hold') L.push(['trig', 'やめる', '#fff']);
+  if (F.redPaint && !(room && room.noPower)) L.push(['a', pm ? '光⇄［色］' : '［光］⇄色', '#fff']);
   L.push(['stick', '押す：正面', '#bbb']);
   if (room && room.time) L.push([null, '時代：' + ERA_LABEL[era], '#fff']);
   return { R, L };
@@ -1606,11 +1703,11 @@ function updateHands() {
     if (h) animModel(h);
     let show = false;
     if (vis && h) { h.grip.getWorldPosition(tmp2); show = inView(tmp2, 0.55) || (side === 'left' && !!hint); }
-    set.lines.visible = show;
-    const pos = set.lines.geometry.attributes.position; let n = 0;
+    set.outer.visible = set.inner.visible = show;
+    let n = 0;
     set.tags.forEach((b, i) => {
-      const row = list[i];
-      if (!show || !row) { b.mesh.visible = false; return; }
+      const row = list[i], dot = set.dots[i];
+      if (!show || !row) { b.mesh.visible = false; dot.visible = false; return; }
       drawTag(b, row);
       const sx = side === 'right' ? 1 : -1;
       // 札は、手の外側に、見ている向きにそろえて縦に並べる
@@ -1621,11 +1718,12 @@ function updateHands() {
       b.mesh.position.copy(tagP).addScaledVector(rightV, side === 'right' ? TAG_W / 2 : TAG_W / 2 - tw);
       const part = row[0] && (h.model ? h.model.parts[row[0]] : null);
       if (row[0]) {
-        if (part) { part.getWorldPosition(btnP); } else h.grip.getWorldPosition(btnP);
-        pos.setXYZ(n++, btnP.x, btnP.y, btnP.z); pos.setXYZ(n++, tagP.x, tagP.y, tagP.z);
-      }
+        if (part) part.getWorldPosition(btnP); else h.grip.getWorldPosition(btnP);
+        setRibbon(set.outer, n, btnP, tagP, 0.0034); setRibbon(set.inner, n, btnP, tagP, 0.0013); n++;
+        dot.visible = true; dot.position.copy(btnP); dot.quaternion.copy(qHead);
+      } else dot.visible = false;
     });
-    set.lines.geometry.setDrawRange(0, n); pos.needsUpdate = true;
+    for (const m of [set.outer, set.inner]) { m.geometry.setDrawRange(0, n * 6); m.geometry.attributes.position.needsUpdate = true; }
   }
 }
 
@@ -1638,14 +1736,27 @@ function showButton() { labelsDirty = true; buzz('right', 0.2, 60); }
 function syncUnlocked() { labelsDirty = true; }
 // まだVR版で作っていない画面（通路1から先で使う）
 function notYet() { say('（この画面は、VR版ではまだ作っていない）'); }
-function climb() { notYet(); }
-function startEnding() { notYet(); }
 let lastPress = performance.now();
 
 /* ================= 音 ================= */
 let ac = null;
 function audio() { if (!ac) { try { ac = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {} } if (ac && ac.state === 'suspended') ac.resume(); return ac; }
-function rumble(dur, loud) {
+// 音の出口：場所 pos があれば、その方向から聞こえる
+function sndOut(a, pos) {
+  if (!pos) return a.destination;
+  const p = a.createPanner(); p.panningModel = 'HRTF'; p.distanceModel = 'inverse'; p.refDistance = 1.5; p.rolloffFactor = 0.5;
+  if (p.positionX) { p.positionX.value = pos.x; p.positionY.value = pos.y; p.positionZ.value = pos.z; } else p.setPosition(pos.x, pos.y, pos.z);
+  p.connect(a.destination); return p;
+}
+const lUp = V(0, 1, 0);
+function listenerTick() {
+  if (!ac) return; const L = ac.listener; lUp.set(0, 1, 0).applyQuaternion(camera.getWorldQuaternion(hq));
+  try {
+    if (L.positionX) { L.positionX.value = headPos.x; L.positionY.value = headPos.y; L.positionZ.value = headPos.z; L.forwardX.value = headDir.x; L.forwardY.value = headDir.y; L.forwardZ.value = headDir.z; L.upX.value = lUp.x; L.upY.value = lUp.y; L.upZ.value = lUp.z; }
+    else { L.setPosition(headPos.x, headPos.y, headPos.z); L.setOrientation(headDir.x, headDir.y, headDir.z, lUp.x, lUp.y, lUp.z); }
+  } catch (e) {}
+}
+function rumble(dur, loud, pos) {
   const a = audio(); if (!a) return;
   const t = a.currentTime, buf = a.createBuffer(1, Math.floor(a.sampleRate * dur), a.sampleRate), d = buf.getChannelData(0);
   for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
@@ -1653,13 +1764,32 @@ function rumble(dur, loud) {
   const ws = a.createWaveShaper(), curve = new Float32Array(256); for (let i = 0; i < 256; i++) curve[i] = Math.tanh((i / 128 - 1) * 6); ws.curve = curve;
   const lp = a.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.setValueAtTime(loud ? 3000 : 700, t); lp.frequency.exponentialRampToValueAtTime(70, t + dur);
   const osc = a.createOscillator(); osc.type = 'sawtooth'; osc.frequency.setValueAtTime(52, t); osc.frequency.exponentialRampToValueAtTime(26, t + dur);
-  const g = a.createGain(); g.gain.setValueAtTime(loud ? 0.45 : 0.32, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
-  src.connect(ws); osc.connect(ws); ws.connect(lp); lp.connect(g); g.connect(a.destination); src.start(t); osc.start(t); osc.stop(t + dur);
+  const g = a.createGain(); g.gain.setValueAtTime((loud ? 0.45 : 0.32) * (pos ? 1.6 : 1), t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  src.connect(ws); osc.connect(ws); ws.connect(lp); lp.connect(g); g.connect(sndOut(a, pos)); src.start(t); osc.start(t); osc.stop(t + dur);
 }
-function click() {
+function click(pos, vol) {
   const a = audio(); if (!a) return;
   const t = a.currentTime, o = a.createOscillator(), g = a.createGain(); o.type = 'square'; o.frequency.setValueAtTime(880, t); o.frequency.exponentialRampToValueAtTime(440, t + 0.06);
-  g.gain.setValueAtTime(0.12, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.08); o.connect(g); g.connect(a.destination); o.start(t); o.stop(t + 0.09);
+  g.gain.setValueAtTime(0.12 * (vol || 1) * (pos ? 1.6 : 1), t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.08); o.connect(g); g.connect(sndOut(a, pos)); o.start(t); o.stop(t + 0.09);
+}
+// 過去の人の足音（見えている間、歩いた方から聞こえる）
+function step(pos) {
+  const a = ac; if (!a || a.state !== 'running') return;
+  const t = a.currentTime, n = Math.floor(a.sampleRate * 0.07), buf = a.createBuffer(1, n, a.sampleRate), d = buf.getChannelData(0);
+  for (let i = 0; i < n; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / n, 3);
+  const src = a.createBufferSource(); src.buffer = buf;
+  const lp = a.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 700;
+  const g = a.createGain(); g.gain.value = 0.5;
+  src.connect(lp); lp.connect(g); g.connect(sndOut(a, pos)); src.start(t);
+}
+let GHOSTS = [];
+function ghostSteps() {
+  for (const gh of GHOSTS) {
+    if (gh.mat.opacity < 0.5 || !gh.g.visible) { gh.last = null; continue; }
+    gh.g.getWorldPosition(tmp2);
+    if (!gh.last) gh.last = tmp2.clone();
+    else if (tmp2.distanceTo(gh.last) > 0.42) { gh.last.copy(tmp2); step(tmp2.clone()); }
+  }
 }
 // 揺れ：VRでは景色を揺らさない（酔うため）。両手の振動に置き換える
 function quake(t) { buzz('both', 0.7, Math.min(1500, t * 900)); }
@@ -1799,45 +1929,108 @@ function closeCode(submit) {
   if (submit && cb) cb(codeVal.join(''));
 }
 
-/* ================= 調べる：手に取る（VRでは右手に持ち、手首で回す） ================= */
-const qTilt = new THREE.Quaternion().setFromAxisAngle(V(1, 0, 0), 1.3), qInv = new THREE.Quaternion(), hp = V(0, 0, 0), hq = new THREE.Quaternion();
-function handPose(outP, outQ) {
-  const r = hands.right.ray; r.getWorldPosition(outP); r.getWorldQuaternion(outQ);
-  outP.addScaledVector(tmp.set(0, 0, -1).applyQuaternion(outQ), 0.3);
-}
-// 持つ位置と向き（毎フレーム）。VR：右手の先。パソコン：頭の前1.1m
-function holdPose(outP, outQ) {
-  if (handsOn() && hands.right) { handPose(outP, hq); outQ.copy(hq).multiply(insp.rel); }
-  else { outP.copy(headPos).addScaledVector(headDir, 1.1); outQ.copy(insp.pcQ); }
-}
+/* ================= 手に取る：目の前に浮かび、つかんで動かす。離すとその場で止まる ================= */
+const qTilt = new THREE.Quaternion().setFromAxisAngle(V(1, 0, 0), 1.3), hq = new THREE.Quaternion();
+// 「閉じる」の板（手に取った物の下）
+const cloB = makeBoard(360, 110, 0.24, 64); cloB.follow = false;
+cloB.btns = [{ x: 8, y: 8, w: 344, h: 94, label: '閉じる', onClick: () => endInspect() }];
+function drawClose() { const b = cloB, g = b.g; g.clearRect(0, 0, b.pw, b.ph); for (const t of b.btns) drawButton(g, t, b.hover === t, { center: true, size: 46 }); b.tex.needsUpdate = true; }
 function inspect(obj, home, opt) {
-  const g = obj.g;
-  // 手に来たとき、ふたが少しこちらを向くように（AR版と同じ傾き）
-  const want = camera.getWorldQuaternion(new THREE.Quaternion()).multiply(qTilt);
-  insp = { obj, opt: opt || {}, home: home.clone(), homeQ: g.quaternion.clone(), state: 'in', t: 0, p0: g.position.clone(), q0: g.quaternion.clone(), pcQ: want.clone(), rel: new THREE.Quaternion() };
-  if (handsOn() && hands.right) { handPose(hp, hq); insp.rel.copy(qInv.copy(hq).invert()).multiply(want); }
+  const g = obj.g, yaw = headYaw();
+  // 目の前60cm、目より少し下。ふたが少しこちらを向くように（AR版と同じ傾き）
+  const p1 = V(headPos.x - Math.sin(yaw) * 0.6, headPos.y - 0.15, headPos.z - Math.cos(yaw) * 0.6);
+  const q1 = camera.getWorldQuaternion(new THREE.Quaternion()).multiply(qTilt);
+  insp = { obj, opt: opt || {}, home: home.clone(), homeQ: g.quaternion.clone(), state: 'in', t: 0, p0: g.position.clone(), q0: g.quaternion.clone(), p1, q1 };
+  cloB.mesh.position.set(p1.x, p1.y - 0.33, p1.z); cloB.mesh.lookAt(headPos); drawClose();
   setLight(null); refreshUI(); buzz('right', 0.25, 60);
 }
 function endInspect() {
   if (!insp || insp.state !== 'hold') return;
+  if (grab) endGrab();
   const g = insp.obj.g;
   Object.assign(insp, { state: 'out', t: 0, p0: g.position.clone(), q0: g.quaternion.clone() });
-  setLight(null); refreshUI();
+  hideBoard(cloB); setLight(null); refreshUI();
 }
 function rotateHeld(dx, dy) {   // パソコンでの確認用：ドラッグで回す
-  qT.setFromAxisAngle(tmp.set(0, 1, 0).applyQuaternion(camera.getWorldQuaternion(hq)), dx * 0.012); insp.pcQ.premultiply(qT);
-  qT.setFromAxisAngle(tmp.set(1, 0, 0).applyQuaternion(hq), dy * 0.012); insp.pcQ.premultiply(qT);
+  const g = insp.obj.g; camera.getWorldQuaternion(hq);
+  qT.setFromAxisAngle(tmp.set(0, 1, 0).applyQuaternion(hq), dx * 0.012); g.quaternion.premultiply(qT);
+  qT.setFromAxisAngle(tmp.set(1, 0, 0).applyQuaternion(hq), dy * 0.012); g.quaternion.premultiply(qT);
+  insp.q1.copy(g.quaternion);
 }
-const ip = V(0, 0, 0), iq = new THREE.Quaternion();
 function inspTick(dt) {
   const g = insp.obj.g;
-  if (insp.state === 'hold') { holdPose(ip, iq); g.position.copy(ip); g.quaternion.copy(iq); if (insp.opt.tick) insp.opt.tick(dt); return; }
+  if (insp.state === 'hold') { if (insp.opt.tick) insp.opt.tick(dt); return; }
   insp.t = Math.min(1, insp.t + dt / 0.6); const e = ease(insp.t);
-  if (insp.state === 'in') holdPose(ip, iq); else { ip.copy(insp.home); iq.copy(insp.homeQ); }
-  g.position.lerpVectors(insp.p0, ip, e); g.quaternion.slerpQuaternions(insp.q0, iq, e);
+  const tp = insp.state === 'in' ? insp.p1 : insp.home, tq = insp.state === 'in' ? insp.q1 : insp.homeQ;
+  g.position.lerpVectors(insp.p0, tp, e); g.quaternion.slerpQuaternions(insp.q0, tq, e);
   if (insp.t >= 1) {
-    if (insp.state === 'in') { insp.state = 'hold'; if (insp.opt.onArrive) insp.opt.onArrive(); refreshUI(); }
+    if (insp.state === 'in') { insp.state = 'hold'; cloB.mesh.visible = true; if (insp.opt.onArrive) insp.opt.onArrive(); refreshUI(); }
     else { g.position.copy(insp.home); g.quaternion.copy(insp.homeQ); insp = null; refreshUI(); }
+  }
+}
+
+/* ---- つかむ（人差し指と中指で握る）。光の線の先で、離れた物もつかめる ---- */
+// 部屋の物は targets の grab: { obj, can(), onMove(位置, 動いた距離) → 'done' でつかむのを終える, onSnap(), onRelease(obj) }
+// 手に取った物の中の部品は inspect の opt.parts に同じ形で書く
+let grab = null, gAim = false;
+const handM = new THREE.Matrix4(), objM = new THREE.Matrix4(), parM = new THREE.Matrix4();
+function handMatrix(out) { const o = handsOn() && hands.right ? hands.right.ray : camera; o.updateMatrixWorld(); return out.copy(o.matrixWorld); }
+function distRay(p) { tmp.copy(p).sub(aimOrigin); const along = tmp.dot(aimDir); if (along < 0) return 1e9; return tmp.addScaledVector(aimDir, -along).length(); }
+function grabCandidate() {
+  if (!room || !playing || dlg || busy || menuOpen || manualOpen || logOpen || codeOpen || editOpen) return null;
+  if (insp) {
+    if (insp.state !== 'hold') return null;
+    for (const pt of (insp.opt.parts || [])) if ((!pt.can || pt.can()) && pt.obj.visible) { pt.obj.getWorldPosition(tmp2); if (distRay(tmp2) < 0.07) return { obj: pt.obj, spec: pt }; }
+    return { obj: insp.obj.g, spec: null, isInsp: true };
+  }
+  const t = aimed && room.targets[aimed];
+  if (t && t.grab && (!t.grab.can || t.grab.can())) return { obj: t.grab.obj, spec: t.grab };
+  return null;
+}
+function startGrab(c) {
+  if (c.obj.parent !== room.grp) room.grp.attach(c.obj);
+  handMatrix(handM); c.obj.updateMatrixWorld();
+  grab = Object.assign({}, c, { rel: new THREE.Matrix4().copy(handM).invert().multiply(c.obj.matrixWorld), start: c.obj.getWorldPosition(V(0, 0, 0)) });
+  if (grab.spec && grab.spec.onStart) grab.spec.onStart();
+  buzz('right', 0.35, 40); setLight(null); labelsDirty = true;
+}
+function grabTick() {
+  if (!grab) return;
+  handMatrix(handM); objM.multiplyMatrices(handM, grab.rel);
+  grab.obj.parent.updateMatrixWorld(); parM.copy(grab.obj.parent.matrixWorld).invert(); objM.premultiply(parM);
+  if (!(grab.spec && grab.spec.noMove)) objM.decompose(grab.obj.position, grab.obj.quaternion, grab.obj.scale);
+  if (grab.spec && grab.spec.onMove) {
+    grab.obj.getWorldPosition(tmp2);
+    if (grab.spec.onMove(tmp2, tmp2.distanceTo(grab.start)) === 'done') { const s = grab; grab = null; labelsDirty = true; buzz('right', 0.5, 80); if (s.spec.onSnap) s.spec.onSnap(); }
+  }
+}
+function endGrab() {
+  if (!grab) return; const s = grab; grab = null; labelsDirty = true;
+  if (s.isInsp && insp) { insp.p1.copy(s.obj.position); insp.q1.copy(s.obj.quaternion); }
+  if (s.spec && s.spec.onRelease) s.spec.onRelease(s.obj);
+}
+// 離した物：床に落ちる／元の場所に戻る
+const moving = [];
+function dropToFloor(obj, onLand) { moving.push({ obj, v: 0, onLand, kind: 'fall' }); }
+function returnHome(obj, p, q, onDone) { moving.push({ obj, kind: 'home', t: 0, p0: obj.position.clone(), q0: obj.quaternion.clone(), p, q, onDone }); }
+const qFlat = new THREE.Quaternion();
+function movingTick(dt) {
+  for (let i = moving.length - 1; i >= 0; i--) {
+    const m = moving[i], o = m.obj;
+    if (m.kind === 'fall') {
+      m.v += 6 * dt; o.position.y -= m.v * dt;
+      const minY = FLOOR + (o.userData.floorOff || 0.012);
+      if (o.position.y <= minY) {
+        o.position.y = minY; moving.splice(i, 1);
+        if (o.userData.flat) { qFlat.setFromEuler(new THREE.Euler(-Math.PI / 2, 0, (o.position.x * 7) % 1)); o.quaternion.copy(qFlat); }
+        else { const e = new THREE.Euler().setFromQuaternion(o.quaternion, 'YXZ'); o.quaternion.setFromEuler(new THREE.Euler(0, e.y, 0, 'YXZ')); }
+        click(o.position.clone(), 0.5); if (m.onLand) m.onLand();
+      }
+    } else {
+      m.t = Math.min(1, m.t + dt / 0.35); const e = ease(m.t);
+      o.position.lerpVectors(m.p0, m.p, e); o.quaternion.slerpQuaternions(m.q0, m.q, e);
+      if (m.t >= 1) { moving.splice(i, 1); if (m.onDone) m.onDone(); }
+    }
   }
 }
 
@@ -1849,25 +2042,38 @@ const KANA_PAGES = [
   { name: '数字・記号', rows: ['０１２３４５６７８９', '：＋－＝＜＞！？…', '!?:+-=<>()./', 'ー・、。「」〜'] }
 ];
 const edB = makeBoard(1200, 1000, 1.15, 64);
-let ed = null;
+let ed = null, edGreen = false;
 function openEditor(edit) {
-  if (edit.blank) { notYet(); return; }   // 透明な空欄は3-2で作る
   const orig = [...edit.text];
-  ed = { edit, orig, chars: orig.slice(), sel: 0, page: 0 };
-  editOpen = true; setLight(null); layoutEditor(); showBoard(edB, 1.4, -0.12); drawEditor(); refreshUI();
+  ed = { edit, orig, chars: orig.slice(), sel: 0, page: 0, blank: null };
+  if (edit.blank) { ed.blank = { idx: orig.length, key: edit.flag }; ed.orig.push('　'); ed.chars.push('　'); }
+  editOpen = true; edGreen = false; setLight(null); layoutEditor(); showBoard(edB, 1.4, -0.12); drawEditor(); refreshUI();
+}
+const blankSeen = () => !!(ed && ed.blank && G.flags.seen['blank_' + ed.blank.key]);
+const blankReal = () => !!(ed && ed.blank && G.flags.ev['blankreal_' + ed.blank.key]);
+// 空欄のある言葉で、緑を持っているときだけ、コントローラーの光⇄色（左手のX）と緑（右手のB）が書き換えの中で使える
+function edPads() { return !!(editOpen && ed && ed.blank && G.flags.green && !blankReal()); }
+function edColorDown() {
+  if (!paintMode) { edGreen = true; G.flags.seen['blank_' + ed.blank.key] = true; layoutEditor(); drawEditor(); }
+  else if (blankSeen() && !blankReal()) { G.flags.ev['blankreal_' + ed.blank.key] = true; softFlash('green'); layoutEditor(); drawEditor(); refreshUI(); }
 }
 const ED_GY = 330, ED_GH = 70;
 function layoutEditor() {
-  const b = edB, n = ed.chars.length, cw = Math.min(100, 1100 / n), x0 = (b.pw - n * cw) / 2;
+  const b = edB;
+  const idxs = ed.chars.map((c, i) => i).filter(i => !(ed.blank && i === ed.blank.idx && !blankSeen() && !blankReal()));
+  const n = idxs.length, cw = Math.min(100, 1100 / n), x0 = (b.pw - n * cw) / 2;
   b.btns = [];
-  ed.chars.forEach((ch, i) => b.btns.push({ x: x0 + i * cw + 4, y: 36, w: cw - 8, h: 104, label: ch, kind: 'char', i, onClick: () => { ed.sel = i; drawEditor(); } }));
+  idxs.forEach((i, k) => {
+    const blank = ed.blank && i === ed.blank.idx && !blankReal();
+    b.btns.push({ x: x0 + k * cw + 4, y: 36, w: cw - 8, h: 104, label: ed.chars[i], kind: blank ? 'blank' : 'char', i, onClick: () => { if (!blank) { ed.sel = i; drawEditor(); } } });
+  });
   const tw = 270; KANA_PAGES.forEach((pg, i) => b.btns.push({ x: 33 + i * (tw + 12), y: 236, w: tw, h: 70, label: pg.name, kind: 'tab', i, onClick: () => { ed.page = i; layoutEditor(); drawEditor(); } }));
   const gw = 108, gx0 = (b.pw - 10 * gw) / 2;
   KANA_PAGES[ed.page].rows.forEach((row, r) => [...row].forEach((ch, c) => b.btns.push({ x: gx0 + c * gw + 3, y: ED_GY + r * ED_GH + 3, w: gw - 6, h: ED_GH - 6, label: ch, kind: 'key', onClick: () => pickChar(ch) })));
   const by = ED_GY + 9 * ED_GH + 24;
   b.btns.push({ x: 290, y: by, w: 290, h: 84, label: '決定', onClick: () => closeEditor(true) });
   b.btns.push({ x: 620, y: by, w: 290, h: 84, label: 'やめる', onClick: () => closeEditor(false) });
-  resizeBoard(b, by + 112);
+  resizeBoard(b, by + 112 + 60);
 }
 function drawEditor() {
   const b = edB, g = b.g, white = ed.edit.style === 'white'; g.clearRect(0, 0, b.pw, b.ph);
@@ -1880,6 +2086,9 @@ function drawEditor() {
       frame(g, t.x, t.y, t.w, t.h, sel ? '#fff' : hot ? '#333' : '#000', sel ? '#fff' : '#777', sel ? 6 : 3);
       g.font = `72px ${FONT}`; g.fillStyle = white ? (sel ? '#000' : '#fff') : '#e01818'; g.fillText(ed.chars[t.i], t.x + t.w / 2, t.y + t.h / 2 + 4);
       if (chg) { g.fillStyle = sel ? '#000' : '#fff'; g.fillRect(t.x + 14, t.y + t.h - 14, t.w - 28, 5); }
+    } else if (t.kind === 'blank') {   // 見つけたが、まだ透明な空欄
+      if (edGreen) { g.fillStyle = 'rgba(31,168,69,.35)'; g.fillRect(t.x, t.y, t.w, t.h); }
+      g.setLineDash([12, 9]); g.lineWidth = 4; g.strokeStyle = '#3fd06a'; g.strokeRect(t.x + 2, t.y + 2, t.w - 4, t.h - 4); g.setLineDash([]);
     } else if (t.kind === 'tab') {
       const cur = t.i === ed.page;
       frame(g, t.x, t.y, t.w, t.h, cur ? '#fff' : hot ? '#333' : '#000', '#fff', 3);
@@ -1892,11 +2101,15 @@ function drawEditor() {
   g.font = `28px ${FONT}`; g.fillStyle = '#aaa'; g.textAlign = 'center';
   g.fillText('書き換えたい文字を選び、下の表から入れる文字を選んで「決定」', b.pw / 2, 172);
   g.fillText('書き換えられるのは、一文字だけ', b.pw / 2, 208);
+  if (edPads()) {   // 操作だけを出す
+    g.fillStyle = '#fff'; g.font = `32px ${FONT}`;
+    g.fillText('左手のX：' + (paintMode ? '光⇄［色］' : '［光］⇄色') + '　　右手のB：' + (paintMode ? '緑色' : '緑の光'), b.pw / 2, b.ph - 40);
+  }
   b.tex.needsUpdate = true;
 }
-function pickChar(ch) { ed.chars = ed.orig.slice(); ed.chars[ed.sel] = ch; drawEditor(); }   // 1か所だけ：ほかの場所を変えていたら元に戻す
+function pickChar(ch) { if (ed.blank && ed.sel === ed.blank.idx && !blankReal()) return; ed.chars = ed.orig.slice(); ed.chars[ed.sel] = ch; drawEditor(); }   // 1か所だけ：ほかの場所を変えていたら元に戻す
 function closeEditor(submit) {
-  const e = ed; editOpen = false; hideBoard(edB); ed = null; refreshUI();
+  const e = ed; editOpen = false; edGreen = false; hideBoard(edB); ed = null; refreshUI();
   if (!submit) return;
   if (e.chars.join('').replace(/　/g, '') === e.edit.goal) { softFlash('red'); e.edit.done(); }
   else say('何も起きない。');
@@ -1906,10 +2119,12 @@ function closeEditor(submit) {
 const menuB = makeBoard(720, 100, 0.72, 64);
 let menuItems = [];
 const TEST_ROOMS = [['1-1', 's1', []], ['通路1', 'c1', []], ['1-2', 's2', ['red']], ['通路2', 'c2', ['red']], ['1-3', 's3', ['red', 'green']], ['通路3', 'c3', ['red', 'green']],
-  ['1-4', 's4', ['red', 'green', 'blue']], ['通路4', 'c4', ['red', 'green', 'blue']], ['2-1', 's5', ['red', 'green', 'blue', 'redPaint']]];
+  ['1-4', 's4', ['red', 'green', 'blue']], ['通路4', 'c4', ['red', 'green', 'blue']], ['2-1', 's5', ['red', 'green', 'blue', 'redPaint']],
+  ['通路5', 'c5', ['red', 'green', 'blue', 'redPaint', 'paintGB']], ['2-2', 's6', ['red', 'green', 'blue', 'redPaint', 'paintGB']], ['通路6', 'c6', ['red', 'green', 'blue', 'redPaint', 'paintGB']],
+  ['3-1', 's7', ['red', 'green', 'blue', 'redPaint', 'paintGB']], ['3-2', 's8', ['red', 'green', 'blue', 'redPaint', 'paintGB', 'ev.blackReady']], ['最終', 's9', ['red', 'green', 'blue', 'redPaint', 'paintGB', 'ev.blackReady', 'white']]];
 let menuSub = null;
 function testGo(id, gifts) {
-  closeMenu(); G.flags = newFlags(); G.flags.ev.ctrlSeen = true; for (const k of gifts) G.flags[k] = true;
+  closeMenu(); G.flags = newFlags(); G.flags.ev.ctrlSeen = true; for (const k of gifts) { if (k.startsWith('ev.')) G.flags.ev[k.slice(3)] = true; else G.flags[k] = true; }
   paintMode = false; hint = null; labelsDirty = true; goRoom(id);
 }
 function buildMenu() {
@@ -1971,7 +2186,8 @@ function openManual() {
   li('右手の人差し指', '光の線を合わせて押す（扉に入る・物を手に取る・選ぶ）');
   li('左手のY', 'メニューを開く');
   li('左手のスティックを押す', 'いま向いている方を、正面にする');
-  li('手に取った物', '手首を回すと回る。左手の人差し指で元に戻す');
+  li('右手の人差し指と中指で握る', 'つかむ（離すと、その場で止まる）');
+  li('手に取った物', '「閉じる」を押すと、元の場所へ戻る');
   if (F.red || F.green || F.blue) {
     sec('光');
     if (F.red) li('{r}右手のA{/}（押している間）', '赤の光を出す');
@@ -2055,8 +2271,8 @@ function drawLog() {
   for (const bt of b.btns) drawButton(g, bt, b.hover === bt, { center: true });
   b.tex.needsUpdate = true;
 }
-const redrawBoard = b => b === menuB ? drawMenu() : b === manB ? drawManual() : b === logB ? drawLog() : b === codeB ? drawCode() : b === edB ? drawEditor() : null;
-const UI_BOARDS = [menuB, manB, logB, codeB, edB];
+const redrawBoard = b => b === cloB ? drawClose() : b === menuB ? drawMenu() : b === manB ? drawManual() : b === logB ? drawLog() : b === codeB ? drawCode() : b === edB ? drawEditor() : null;
+const UI_BOARDS = [menuB, manB, logB, codeB, edB, cloB];
 
 /* ================= 体の向き：正面を合わせる・45度回る ================= */
 function rotateRigAbout(p, a) {
@@ -2080,7 +2296,7 @@ function snapTurn(dir) {
 }
 
 /* ================= 試験：パススルー ================= */
-let ptT = 0;
+let ptT = 0, nightOn = false;
 function testPassthrough() {
   if (!room) return;
   ptT = 6; room.grp.visible = false;
@@ -2096,11 +2312,12 @@ function blackOut(cb) { blackT = { from: blackS.material.opacity, to: 0, t: 0, d
 let needCalib = true;
 function loadRoom(id) {
   if (room) { scene.remove(room.grp); if (room.onLeave) room.onLeave(); }
+  grab = null; moving.length = 0; GHOSTS = []; hideBoard(cloB); climbing = null; rig.position.y = inXR ? rigY : 0;
   const r = ROOMS[id]();
   room = Object.assign({ id }, r); scene.add(room.grp); setEra('present');
   needCalib = true; if (!inXR) { dragYaw = 0; dragPitch = 0; }
 }
-const VR_READY = { s1: true, c1: true, s2: true, c2: true, s3: true, c3: true, c3b: true, s4: true, c4: true, s5: true };   // VR版で作り終えた部屋
+const VR_READY = { s1: true, c1: true, s2: true, c2: true, s3: true, c3: true, c3b: true, s4: true, c4: true, s5: true, c5: true, s6: true, c6: true, s7: true, s8: true, s9: true };   // VR版で作り終えた部屋
 let endShown = false;
 function goRoom(id) {
   busy = true; setLight(null); refreshUI();
@@ -2109,6 +2326,111 @@ function goRoom(id) {
     loadRoom(id); busy = false; refreshUI(); setTimeout(() => blackOut(), 200);
     if (room.onEnter) setTimeout(() => room.onEnter(), 900);
   });
+}
+
+/* ================= はしごを自分の手で登る → 円の場面 ================= */
+// はしごを調べたあと、はしごを指して握り、手を下に引くと体が上がる（つかみ直してくり返す）。1m上がると暗転
+let climbing = null;
+function climb() {
+  if (!(handsOn() && hands.right)) {   // パソコン：AR版と同じく、自動で上がる
+    busy = true; setLight(null); refreshUI(); const s = performance.now();
+    const f = () => { const k = Math.min(1, (performance.now() - s) / 1600); rig.position.y = 1.2 * ease(k); if (k < 1 && busy) requestAnimationFrame(f); }; f();
+    setTimeout(toCircle, 1000); return;
+  }
+  climbing = { rise: 0, base: rig.position.y }; labelsDirty = true;
+}
+const climbGrab = () => ({ noMove: true, can: () => !!climbing,
+  onStart: () => { climbing.y0 = hands.right ? hands.right.ray.position.y : 0; climbing.r0 = climbing.rise; },
+  onMove: () => {
+    const y = hands.right ? hands.right.ray.position.y : climbing.y0;
+    const r = Math.max(climbing.rise, climbing.r0 + (climbing.y0 - y));
+    if (Math.floor(r * 6) > Math.floor(climbing.rise * 6)) buzz('right', 0.25, 30);
+    climbing.rise = r; rig.position.y = climbing.base + r;
+    return r >= 1.0 ? 'done' : null;
+  },
+  onSnap: () => toCircle() });
+let circ = null;
+const circB = makeBoard(1280, 960, 1.6, 88);
+function toCircle() {
+  busy = true; climbing = null; setLight(null); refreshUI();
+  blackIn(() => {
+    rig.position.y = inXR ? rigY : 0; playing = false; busy = false; refreshUI();
+    circ = { i: 0, c: 0, t: 0 }; whiteS.material.opacity = 1; showBoard(circB, 1.8, 0); drawCircleB(0); blackOut();
+  });
+}
+function circleAdvance() {
+  const l = CIRCLE_LINES[circ.i];
+  if (circ.c < l.length) { circ.c = l.length; return; }
+  G.log.push({ t: l, who: 'me' });
+  circ.i++; circ.c = 0;
+  if (circ.i >= CIRCLE_LINES.length) {
+    circ = null;
+    blackIn(() => { hideBoard(circB); whiteS.material.opacity = 0; loadRoom('s9'); playing = true; refreshUI(); setTimeout(() => { blackOut(); setTimeout(() => room.onEnter(), 500); }, 300); });
+  }
+}
+function drawCircleB(dt) {   // AR版と同じ絵を、目の前の大きな板に描く
+  const b = circB, g = b.g; circ.t += dt; circ.c = Math.min(CIRCLE_LINES[circ.i].length, circ.c + dt * 16);
+  g.setTransform(1, 0, 0, 1, 0, 0); g.fillStyle = '#fff'; g.fillRect(0, 0, b.pw, b.ph); g.setTransform(2, 0, 0, 2, 0, 0);
+  const cx = 320, cy = 190, k = Math.min(1, circ.i / 9), R = 150 - k * 70, n = 9;
+  g.strokeStyle = '#000'; g.lineWidth = 3; g.beginPath(); g.arc(cx, cy, R, 0, Math.PI * 2); g.stroke();
+  for (let i = 0; i < n; i++) {
+    const a = -Math.PI / 2 + i * Math.PI * 2 / n + circ.t * 0.05, x = cx + Math.cos(a) * R, y = cy + Math.sin(a) * R;
+    g.fillStyle = '#fff'; g.fillRect(x - 12, y - 9, 24, 18); g.strokeRect(x - 12, y - 9, 24, 18);
+  }
+  const wr = 20 + k * 40; g.fillStyle = '#bbb';
+  for (let i = -3; i <= 3; i++) { const bh = wr * (0.6 + ((i * 7 + 21) % 5) / 6); g.fillRect(cx + i * wr / 3.2 - wr / 8, cy + wr * 0.5 - bh, wr / 4, bh); }
+  g.strokeStyle = '#000'; g.beginPath(); g.arc(cx, cy, wr * 0.9, 0, Math.PI * 2); g.stroke();
+  const line = CIRCLE_LINES[circ.i];
+  g.fillStyle = '#000'; g.font = `22px ${FONT}`; g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.fillText(line.slice(0, Math.floor(circ.c)), 320, 400);
+  if (circ.c >= line.length) { g.font = `14px ${FONT}`; g.fillText('▼', 320, 440); }
+  g.setTransform(1, 0, 0, 1, 0, 0); b.tex.needsUpdate = true;
+}
+
+/* ================= 結末：白い世界が透けて、本物の周り（パススルー）が見えてくる → 暗くなる → エピローグ ================= */
+let ending = null, epi = null;
+function startEnding() {
+  busy = true; setLight(null); refreshUI();
+  const white = new THREE.Mesh(new THREE.SphereGeometry(3, 32, 16), new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 1, side: THREE.BackSide, depthWrite: false }));
+  white.position.copy(headPos); white.renderOrder = -5; scene.add(white);
+  const pass = inXR && xrMode === 'immersive-ar';
+  let town = null;
+  if (!pass) {   // パススルーが使えないときは、描いた町が周りに透けて見える
+    town = new THREE.Mesh(new THREE.CylinderGeometry(4.5, 4.5, 4.5, 48, 1, true), new THREE.MeshBasicMaterial({ map: townTexture().clone(), side: THREE.BackSide }));
+    town.material.map.wrapS = THREE.RepeatWrapping; town.material.map.repeat.set(4, 1); town.material.map.needsUpdate = true;
+    town.position.set(headPos.x, headPos.y + 0.4, headPos.z); town.renderOrder = -8; scene.add(town);
+  }
+  ending = { t: 0, white, town, pass, dark: false };
+}
+function endingTick(dt) {
+  const e = ending; e.t += dt;
+  const k = Math.min(1, e.t / 10);
+  e.white.material.opacity = 1 - k;
+  if (e.pass) skyS.material.opacity = 1 - k;
+  if (room && room.grp) room.grp.traverse(o => { if (o.material) { o.material.transparent = true; o.material.opacity = Math.min(o.material.opacity, 1 - k); } });
+  if (e.t > 7.5 && !e.dark) {   // 現実が見え始めたところで、ゆっくり暗くなる
+    e.dark = true;
+    blackT = { from: blackS.material.opacity, to: 1, t: 0, dur: 3, cb: () => {
+      scene.remove(e.white); if (e.town) scene.remove(e.town); skyS.material.opacity = 1;
+      ending = null; busy = false; playing = false; refreshUI();
+      epi = { i: 0, c: 0, done: false, tt: 0 }; showBoard(bigB, 1.6, 0);
+    } };
+  }
+}
+function epiAdvance() {
+  if (epi.done) { if (epi.titleShown) { epi = null; toTitle(); } return; }
+  const l = EPILOGUE[epi.i];
+  if (epi.c < l.length) { epi.c = l.length; return; }
+  epi.i++; epi.c = 0;
+  if (epi.i >= EPILOGUE.length) { epi.done = true; epi.tt = 0; }   // 最後に「Colors」が出て、「s」だけが薄くなる
+}
+function drawColorsTitle(a, sA) {
+  const b = bigB, g = b.g; g.clearRect(0, 0, b.pw, b.ph);
+  g.font = `150px "Helvetica Neue", Arial, sans-serif`; g.textBaseline = 'middle'; g.textAlign = 'left';
+  const t1 = 'Color', w1 = g.measureText(t1).width, w2 = g.measureText('s').width, x0 = (b.pw - w1 - w2) / 2, y = b.ph / 2;
+  g.lineWidth = 3; g.strokeStyle = `rgba(255,255,255,${a})`; g.strokeText(t1, x0, y);
+  g.strokeStyle = `rgba(255,255,255,${a * sA})`; g.strokeText('s', x0 + w1, y);
+  b.tex.needsUpdate = true;
 }
 
 /* ================= プロローグと導入 ================= */
@@ -2131,11 +2453,11 @@ function beginS1() {
 
 /* ================= タイトル・VRの開始と終了 ================= */
 function hasSave() { try { return !!localStorage.getItem(SAVE_KEY); } catch (e) { return false; } }
-function resetUIState() { paintMode = false; hint = null; dlg = null; insp = null; menuOpen = manualOpen = logOpen = false; for (const b of boards) hideBoard(b); setLight(null); labelsDirty = true; }
+function resetUIState() { grab = null; paintMode = false; hint = null; dlg = null; insp = null; menuOpen = manualOpen = logOpen = false; for (const b of boards) hideBoard(b); setLight(null); labelsDirty = true; }
 let toastT = 0;
 function toast(s) { const el = $('toast'); el.textContent = s; el.classList.add('show'); clearTimeout(toastT); toastT = setTimeout(() => el.classList.remove('show'), 1800); }
 function toTitle(msg) {
-  playing = false; pro = null; introT = -1; endShown = false; resetUIState(); busy = false;
+  playing = false; pro = null; introT = -1; endShown = false; circ = null; epi = null; ending = null; climbing = null; whiteS.material.opacity = 0; nightOn = false; skyS.material.opacity = 1; rig.position.y = inXR ? rigY : 0; resetUIState(); busy = false;
   blackS.material.opacity = 1; blackT = null;
   $('title').hidden = false; $('tCont').disabled = !hasSave();
   if (xrSession) { try { xrSession.end(); } catch (e) {} }
@@ -2188,7 +2510,7 @@ $('tCont').addEventListener('click', async () => {
 
 /* ================= ボタン（コントローラー・キーボード・マウス） ================= */
 // 名前：R＝右手、L＝左手。trig＝人差し指、grip＝握る、a＝A/X、b＝B/Y、stick＝スティック押し込み
-const KEYMAP = { KeyE: 'Rtrig', Enter: 'Rtrig', Space: 'Rtrig', KeyJ: 'Ra', KeyK: 'Rb', KeyL: 'Rgrip', KeyQ: 'La', Escape: 'Lb', KeyR: 'Lstick', Backspace: 'Ltrig' };
+const KEYMAP = { KeyE: 'Rtrig', Enter: 'Rtrig', Space: 'Rtrig', KeyJ: 'Ra', KeyK: 'Rb', KeyL: 'Rgrip', KeyQ: 'La', Escape: 'Lb', KeyR: 'Lstick', Backspace: 'Ltrig', KeyG: 'grab' };
 const kbHeld = {}, simHeld = {}, prevBtn = {};
 let snapLatch = 0;
 function readButtons() {
@@ -2200,7 +2522,7 @@ function readButtons() {
     st[p + 'trig'] = pr(0); st[p + 'grip'] = pr(1); st[p + 'stick'] = pr(3); st[p + 'a'] = pr(4); st[p + 'b'] = pr(5);
     if (p === 'R') sx = gp.axes[2] || 0;
   }
-  for (const k in kbHeld) if (kbHeld[k]) st[KEYMAP[k]] = true;
+  for (const k in kbHeld) if (kbHeld[k]) { if (KEYMAP[k] === 'grab') st.Rtrig = st.Rgrip = true; else st[KEYMAP[k]] = true; }
   for (const k in simHeld) if (simHeld[k]) st[k] = true;
   for (const n of ['Rtrig', 'Rgrip', 'Ra', 'Rb', 'Rstick', 'Ltrig', 'Lgrip', 'La', 'Lb', 'Lstick']) {
     const on = !!st[n];
@@ -2211,25 +2533,48 @@ function readButtons() {
   if (Math.abs(sx) > 0.75 && !snapLatch) { snapLatch = 1; if (playing && !busy) snapTurn(Math.sign(sx)); }
   else if (Math.abs(sx) < 0.3) snapLatch = 0;
 }
+// 人差し指と中指の同時押し（つかむ）：つかめる物を指しているときだけ、少し待って見分ける
+const GESTURE_MS = 150;
+let trigPend = null, gripPend = null;
+function canGrabNow() { return !!grabCandidate(); }
 function btnDown(n) {
   lastPress = performance.now();
   audio();
-  if (n === 'Rtrig') return trigger();
+  if (edPads() && !dlg) {   // 書き換えの中の透明な空欄
+    if (n === 'Rb') return edColorDown();
+    if (n === 'La') { paintMode = !paintMode; labelsDirty = true; drawEditor(); return; }
+  }
+  if (n === 'Rtrig') {
+    if (hoverBtn || !canGrabNow()) return trigger();
+    if (prevBtn.Rgrip) { if (gripPend) { clearTimeout(gripPend); gripPend = null; } colorUp('blue'); const c = grabCandidate(); if (c) startGrab(c); return; }
+    trigPend = setTimeout(() => { trigPend = null; trigger(); }, GESTURE_MS); return;
+  }
+  if (n === 'Rgrip') {
+    if (grab) return;
+    if (trigPend) { clearTimeout(trigPend); trigPend = null; const c = grabCandidate(); if (c) startGrab(c); return; }
+    if (insp) return;   // 手に取っている間は、中指は「つかむ」だけ（青い光は出さない）
+    if (canGrabNow()) { gripPend = setTimeout(() => { gripPend = null; if (prevBtn.Rgrip) colorDown('blue'); }, GESTURE_MS); return; }
+    return colorDown('blue');
+  }
   if (n === 'Ra') return colorDown('red');
   if (n === 'Rb') return colorDown('green');
-  if (n === 'Rgrip') return colorDown('blue');
   if (n === 'La') return toggleMode();
   if (n === 'Lb') { if (menuOpen) closeMenu(); else if (manualOpen) closeManual(); else if (logOpen) closeLog(); else openMenu(); return; }
   if (n === 'Lstick') { if (playing && !busy) recenter(); return; }
-  if (n === 'Ltrig') return endInspect();
+  if (n === 'Ltrig') { if (!inXR) endInspect(); return; }   // パソコンでの確認用（VRでは「閉じる」の板）
 }
 function btnUp(n) {
+  if (n === 'Rb' && edGreen) { edGreen = false; if (ed) drawEditor(); }
   if (n === 'Ra') colorUp('red');
   if (n === 'Rb') colorUp('green');
-  if (n === 'Rgrip') colorUp('blue');
+  if (n === 'Rgrip') { if (gripPend) { clearTimeout(gripPend); gripPend = null; } colorUp('blue'); }
+  if ((n === 'Rtrig' || n === 'Rgrip') && grab) endGrab();
 }
 let hoverBtn = null, hoverBoard = null;
 function trigger() {
+  if (epi) return epiAdvance();
+  if (circ) return circleAdvance();
+  if (ending) return;
   if (pro) return proAdvance();
   if (introT >= 0) return;
   if (endShown) return toTitle();
@@ -2271,7 +2616,7 @@ cv.addEventListener('pointerup', e => {
 let aimed = null;
 function examine() {
   if (room && room.examineAny && room.examineAny()) { room.examineAny()(); return; }
-  if (insp) { const f = insp.opt.examineHeld && insp.opt.examineHeld(); if (f) { f(); refreshUI(); } return; }
+  if (insp) { if (insp.state !== 'hold') return; const f = insp.opt.examineHeld && insp.opt.examineHeld(); if (f) { f(); refreshUI(); } return; }
   if (aimed && room.targets[aimed]) { buzz('right', 0.2, 25); room.targets[aimed].examine(); }
 }
 
@@ -2331,6 +2676,7 @@ function loopFrame(now) {
   if (rh) { rh.ray.getWorldPosition(aimOrigin); aimDir.set(0, 0, -1).applyQuaternion(rh.ray.getWorldQuaternion(qA)); }
   else { aimOrigin.copy(headPos); aimDir.copy(headDir); }
   readButtons();
+  grabTick(); movingTick(dt);
 
   // 暗転
   if (blackT) {
@@ -2339,6 +2685,14 @@ function loopFrame(now) {
     if (k >= 1) { const cb = blackT.cb; blackT = null; if (cb) cb(); }
   }
   blackS.visible = blackS.material.opacity > 0.001;
+  if (circ) { drawCircleB(dt); followBoard(circB, dt); }
+  if (ending) endingTick(dt);
+  if (epi) {
+    if (!epi.done) { const l = EPILOGUE[epi.i]; epi.c = Math.min(l.length, epi.c + dt * 14); drawBig(l.slice(0, Math.floor(epi.c)), { more: epi.c >= l.length }); }
+    else { epi.tt += dt; drawColorsTitle(Math.min(1, epi.tt / 3), epi.tt < 3.8 ? 1 : Math.max(0.2, 1 - (epi.tt - 3.8) / 1.5)); if (epi.tt > 5.3) epi.titleShown = true; }
+    followBoard(bigB, dt);
+  }
+  nightS.material.opacity += ((nightOn ? 0.22 : 0) - nightS.material.opacity) * Math.min(1, dt * 2);
   if (pro) { pro.c = Math.min(PROLOGUE[pro.i].length, pro.c + dt * 14); drawBig(PROLOGUE[pro.i].slice(0, Math.floor(pro.c)), { more: pro.c >= PROLOGUE[pro.i].length }); followBoard(bigB, dt); }
   if (introT >= 0) { introT += dt; if (Math.floor(introT * 20) % 3 === 0) drawNoise(Math.max(0, 1 - introT / 1.8)); followBoard(bigB, dt); if (introT > 2.0) { introT = -1; beginS1(); } }
   if (endShown) followBoard(bigB, dt);
@@ -2375,7 +2729,7 @@ function loopFrame(now) {
       if (t.label) { t.label.visible = can && !!G.flags.seen[t.hidden] && !insp; t.label.lookAt(headPos); }
     }
     aimed = null; let best = AIM;
-    if (playing && !dlg && !insp && !busy && !menuOpen && !manualOpen && !logOpen) for (const k in room.targets) {
+    if (playing && !dlg && !insp && !busy && !menuOpen && !manualOpen && !logOpen && !grab) for (const k in room.targets) {
       const t = room.targets[k]; if (!t.act()) continue;
       const a = aimDir.angleTo(tmp.copy(t.pos).sub(aimOrigin)); if (a < best) { best = a; aimed = k; }
     }
@@ -2386,9 +2740,9 @@ function loopFrame(now) {
   let hitPt = null, dist = 4;
   if (hb && hb.hit) { hitPt = hb.hit.point; dist = hb.hit.distance; }
   else if (hit) { hitPt = hit.point; dist = hit.distance; }
-  beam.visible = !!rh && pointing && (playing || !!hoverBoard || menuOpen || manualOpen || logOpen) && !(insp && !codeOpen && !editOpen);
+  beam.visible = !!rh && pointing && (playing || !!hoverBoard || menuOpen || manualOpen || logOpen);
   if (beam.visible) { beam.position.copy(aimOrigin); beam.quaternion.setFromUnitVectors(V(0, 0, -1), aimDir); beam.scale.set(1, 1, dist); }
-  dot.visible = pointing && !!hitPt && (playing || menuOpen || manualOpen || logOpen) && (!insp || codeOpen || editOpen) && !(lc === 'red' || lc === 'green' || lc === 'white');
+  dot.visible = pointing && !!hitPt && (playing || menuOpen || manualOpen || logOpen) && !grab && !(lc === 'red' || lc === 'green' || lc === 'white');
   if (dot.visible) {
     const big = aimed || hoverBtn ? 2.2 : 1.2;
     dot.position.copy(hitPt).addScaledVector(aimDir, -0.01); dot.lookAt(headPos);
@@ -2409,6 +2763,8 @@ function loopFrame(now) {
       spot.scale.setScalar(hit.distance * Math.tan(LIGHT));
     }
   }
+  gAim = !grab && !!grabCandidate() && !(insp && insp.state !== 'hold');
+  listenerTick(); ghostSteps();
   updateHands();
   renderer.render(scene, camera);
 }
@@ -2421,7 +2777,7 @@ Promise.race([document.fonts && document.fonts.load ? document.fonts.load('20px 
 // 自動テスト用
 window.__colors = { G, get room() { return room && room.id; }, get aimed() { return aimed; }, get dlg() { return !!dlg; }, get dlgText() { return dlg && dlg.lines[dlg.i].t; },
   get menuOpen() { return menuOpen; }, get manualOpen() { return manualOpen; }, get hint() { return hint; }, get pro() { return !!pro; }, get playing() { return playing; },
-  get insp() { return insp && insp.state; }, codeEnter(v) { codeVal = v.split('').map(Number); closeCode(true); }, keys() { return Object.keys(room.targets); }, act(k) { return room.targets[k].act(); }, ex(k) { room.targets[k].examine(); }, get ghostSeen() { return Object.keys(G.flags.seen).filter(k => k.startsWith('ghost')); }, get editOpen() { return editOpen; }, get era() { return era; }, edPick(i, ch) { ed.sel = i; pickChar(ch); }, edOk() { closeEditor(true); },
+  get insp() { return insp && insp.state; }, get grab() { return !!grab; }, get circ() { return !!circ; }, get epi() { return !!epi; }, get ending() { return !!ending; }, get climbing() { return !!climbing; }, idle() { lastPress = performance.now() - 20000; }, get edBlank() { return [blankSeen(), blankReal()]; }, inspPart(i) { const p = insp.opt.parts[i].obj.getWorldPosition(V(0,0,0)); return [p.x, p.y, p.z]; }, get gAim() { return gAim; }, objPos(k) { const o = room.targets[k].grab.obj; const p = o.getWorldPosition(V(0,0,0)); return [p.x, p.y, p.z]; }, codeEnter(v) { codeVal = v.split('').map(Number); closeCode(true); }, keys() { return Object.keys(room.targets); }, act(k) { return room.targets[k].act(); }, ex(k) { room.targets[k].examine(); }, get ghostSeen() { return Object.keys(G.flags.seen).filter(k => k.startsWith('ghost')); }, get editOpen() { return editOpen; }, get era() { return era; }, edPick(i, ch) { ed.sel = i; pickChar(ch); }, edOk() { closeEditor(true); },
   setPaint(v) { paintMode = v; labelsDirty = true; }, paint(c) { paint(c); }, ph(c, on) { pheld[c] = on; },
   fakeHands(on) {   // パソコンで手を置いて、コントローラーの形と札を見る
     fakeHands = on;
