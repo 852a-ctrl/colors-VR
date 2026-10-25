@@ -1675,7 +1675,7 @@ function handRows() {
   else if (!pm && F.white) R.push([null, 'A・B・握る：白い光', '#fff']);
   R.push(['stick', '左右に倒す：回る', '#bbb']);
   const blink = !!(hint && Math.floor((performance.now() - hint.t0) / 550) % 2 === 0 && performance.now() - hint.t0 < 3300);
-  L.push(['b', 'メニュー' + (hint && hint.required ? '　←' : ''), '#fff', blink]);
+  L.push(['b', 'メニュー', '#fff', blink]);
   if (climbing) L.push(['grip', '握って、下に引く：登る', '#fff']);
   if (F.redPaint && !(room && room.noPower)) L.push(['a', pm ? '光⇄［色］' : '［光］⇄色', '#fff']);
   L.push(['stick', '押す：正面', '#bbb']);
@@ -1890,7 +1890,7 @@ function softFlash(c) { flashA = 0.22; flashS.material.color.set(({ red: 0xe0181
 /* ================= 操作の案内（左手の札のメニューが3回点滅する） ================= */
 let hint = null;
 function startHint(required) {
-  hint = { required, t0: performance.now() }; labelsDirty = true;
+  hint = { required, t0: performance.now(), lastBuzz: performance.now() }; labelsDirty = true;
   buzz('left', 0.4, 80);
   if (!required) setTimeout(() => { if (hint && !hint.required) { hint = null; labelsDirty = true; } }, 4400);
 }
@@ -2161,7 +2161,7 @@ function drawMenu() {
 }
 function openMenu() {
   if (!playing || codeOpen || editOpen || insp || busy || pro) return;
-  menuOpen = true; buildMenu(); menuB.t0 = performance.now(); showBoard(menuB, 1.15, -0.1); drawMenu();
+  menuOpen = true; if (hint) hint.opened = true; buildMenu(); menuB.t0 = performance.now(); showBoard(menuB, 1.15, -0.1); drawMenu();
   if (dlg) dlgB.mesh.visible = false;
   refreshUI();
 }
@@ -2334,13 +2334,11 @@ function goRoom(id) {
 /* ================= はしごを自分の手で登る → 円の場面 ================= */
 // はしごを調べたあと、はしごを指して握り、手を下に引くと体が上がる（つかみ直してくり返す）。1m上がると暗転
 let climbing = null;
-function climb() {
-  if (!(handsOn() && hands.right)) {   // パソコン：AR版と同じく、自動で上がる
-    busy = true; setLight(null); refreshUI(); const s = performance.now();
-    const f = () => { const k = Math.min(1, (performance.now() - s) / 1600); rig.position.y = 1.2 * ease(k); if (k < 1 && busy) requestAnimationFrame(f); }; f();
-    setTimeout(toCircle, 1000); return;
-  }
-  climbing = { rise: 0, base: rig.position.y, hand: null }; labelsDirty = true;
+function climb() {   // AR版と同じく、調べると体がゆっくり上がって暗転する（v0.7で手で登る形はやめた）
+  busy = true; setLight(null); refreshUI();
+  const s = performance.now(), base = rig.position.y;
+  const f = () => { const k = Math.min(1, (performance.now() - s) / 1600); rig.position.y = base + 1.2 * ease(k); if (k < 1 && busy) requestAnimationFrame(f); }; f();
+  setTimeout(toCircle, 1000);
 }
 // はしごは「つかむ」の仕組みを使わない（同時押しと重なって握れなかったため）
 const climbGrab = () => null;
@@ -2702,6 +2700,7 @@ function loopFrame(now) {
     else { epi.tt += dt; drawColorsTitle(Math.min(1, epi.tt / 3), epi.tt < 3.8 ? 1 : Math.max(0.2, 1 - (epi.tt - 3.8) / 1.5)); if (epi.tt > 5.3) epi.titleShown = true; }
     followBoard(bigB, dt);
   }
+  if (hint && hint.required && !hint.opened && !menuOpen && playing && now - hint.lastBuzz > 1400) { hint.lastBuzz = now; buzz('left', 0.45, 90); }   // メニューを開くまで、左手が振動し続ける
   nightS.material.opacity += ((nightOn ? 0.22 : 0) - nightS.material.opacity) * Math.min(1, dt * 2);
   if (pro) { pro.c = Math.min(PROLOGUE[pro.i].length, pro.c + dt * 14); drawBig(PROLOGUE[pro.i].slice(0, Math.floor(pro.c)), { more: pro.c >= PROLOGUE[pro.i].length }); followBoard(bigB, dt); }
   if (introT >= 0) { introT += dt; if (Math.floor(introT * 20) % 3 === 0) drawNoise(Math.max(0, 1 - introT / 1.8)); followBoard(bigB, dt); if (introT > 2.0) { introT = -1; beginS1(); } }
