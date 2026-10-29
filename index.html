@@ -1489,7 +1489,7 @@ function animModel(h) {
     paintPart(h, 'grip', F.blue && !np ? BTN_COL.blue : null, pr(1));
     paintPart(h, 'stick', null, pr(3));
   } else {
-    const blink = !!(hint && Math.floor((performance.now() - hint.t0) / 550) % 2 === 0 && performance.now() - hint.t0 < 3300);
+    const blink = hintBlink();
     paintPart(h, 'b', blink ? BTN_COL.white : null, pr(5));
     paintPart(h, 'a', pad && (padBlink || pr(4)) ? BTN_COL.white : null, pr(4)); paintPart(h, 'stick', null, pr(3)); paintPart(h, 'trig', null, pr(0)); paintPart(h, 'grip', null, pr(1));
   }
@@ -1674,7 +1674,7 @@ function handRows() {
   else if (pm && F.ev.blackReady) R.push([null, 'A・B・握る：黒色', '#fff']);
   else if (!pm && F.white) R.push([null, 'A・B・握る：白い光', '#fff']);
   R.push(['stick', '左右に倒す：回る', '#bbb']);
-  const blink = !!(hint && Math.floor((performance.now() - hint.t0) / 550) % 2 === 0 && performance.now() - hint.t0 < 3300);
+  const blink = hintBlink();
   L.push(['b', 'メニュー', '#fff', blink]);
   if (climbing) L.push(['grip', '握って、下に引く：登る', '#fff']);
   if (F.redPaint && !(room && room.noPower)) L.push(['a', pm ? '光⇄［色］' : '［光］⇄色', '#fff']);
@@ -1889,6 +1889,12 @@ function softFlash(c) { flashA = 0.22; flashS.material.color.set(({ red: 0xe0181
 
 /* ================= 操作の案内（左手の札のメニューが3回点滅する） ================= */
 let hint = null;
+// メニューの点滅：ふつうは3回。1-1では、メニューを開くまで白く点滅し続ける
+function hintBlink() {
+  if (!hint) return false;
+  const dt = performance.now() - hint.t0, on = Math.floor(dt / 550) % 2 === 0;
+  return on && (dt < 3300 || (hint.required && !hint.opened));
+}
 function startHint(required) {
   hint = { required, t0: performance.now(), lastBuzz: performance.now() }; labelsDirty = true;
   buzz('left', 0.4, 80);
